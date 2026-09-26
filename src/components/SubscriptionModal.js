@@ -121,10 +121,19 @@ export default function SubscriptionModal({ visible, onClose, user, onPaymentSuc
   async function verifyAndActivatePurchase(purchaseToken, productId) {
     try {
       setLoading(true);
+      let activePlan = selectedPlan;
+      if (productId) {
+        const pid = String(productId).toLowerCase();
+        if (pid.includes('weekly')) activePlan = 'weekly';
+        else if (pid.includes('yearly')) activePlan = 'yearly';
+        else if (pid.includes('monthly')) activePlan = 'monthly';
+      }
+
       console.log('[IAP Verification] Sending token to backend server...', {
         email: user?.email,
         productId,
         purchaseToken,
+        activePlan,
       });
       const res = await fetch(`${API_BASE_URL}/api/payment/verify-play-purchase`, {
         method: 'POST',
@@ -132,8 +141,8 @@ export default function SubscriptionModal({ visible, onClose, user, onPaymentSuc
         body: JSON.stringify({
           email: user?.email,
           purchaseToken: purchaseToken || `test_token_${Date.now()}`,
-          productId: productId || selectedPlan,
-          plan: selectedPlan,
+          productId: productId || activePlan,
+          plan: activePlan,
         }),
       });
       const data = await res.json();

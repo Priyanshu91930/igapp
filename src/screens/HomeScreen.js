@@ -40,6 +40,105 @@ import {
   removeDownloadListener,
 } from '../services/downloadManager';
 
+function FileDownloadButton({ file, onDownloadClick, onOpenClick }) {
+  const [downloadStatus, setDownloadStatus] = useState('idle'); // 'idle' | 'downloading' | 'downloaded'
+  const [downloadProgress, setDownloadProgress] = useState(0);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkFileStatus = async () => {
+      try {
+        const safeName = (file.name || '').replace(/[^\w\-. ]/g, '_');
+        const fileUri = FileSystem.documentDirectory + safeName;
+        const info = await FileSystem.getInfoAsync(fileUri);
+
+        if (info.exists && info.size > 0) {
+          if (isMounted) {
+            setDownloadStatus('downloaded');
+            setDownloadProgress(1);
+          }
+          return;
+        }
+
+        const history = await getHistory();
+        const existing = history.find((h) => h.name === file.name);
+        if (existing && isMounted) {
+          if (existing.status === 'downloaded') {
+            setDownloadStatus('downloaded');
+            setDownloadProgress(1);
+          } else if (existing.status === 'downloading') {
+            setDownloadStatus('downloading');
+            setDownloadProgress(existing.progress || 0);
+          }
+        }
+      } catch (err) {
+        // ignore
+      }
+    };
+
+    checkFileStatus();
+
+    const unsub = addDownloadListener(file.name, (update) => {
+      if (!isMounted) return;
+      if (update.status === 'downloading') {
+        setDownloadStatus('downloading');
+        if (typeof update.progress === 'number') {
+          setDownloadProgress(update.progress);
+        }
+      } else if (update.status === 'downloaded') {
+        setDownloadStatus('downloaded');
+        setDownloadProgress(1);
+      } else if (update.status === 'failed' || update.status === 'cancelled') {
+        setDownloadStatus('idle');
+        setDownloadProgress(0);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, [file.name]);
+
+  if (downloadStatus === 'downloaded') {
+    return (
+      <TouchableOpacity
+        style={styles.folderActionIconBtn}
+        hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+        onPress={() => onOpenClick && onOpenClick(file)}
+        activeOpacity={0.7}
+      >
+        <Ionicons name="checkmark-circle" size={28} color="#10B981" />
+      </TouchableOpacity>
+    );
+  }
+
+  if (downloadStatus === 'downloading') {
+    const pct = Math.round(downloadProgress * 100);
+    return (
+      <View style={styles.circularProgressWrap}>
+        <ActivityIndicator size="small" color="#10B981" />
+        <Text style={styles.circularProgressText}>{pct > 0 ? `${pct}%` : '0%'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <TouchableOpacity
+      style={styles.folderActionIconBtn}
+      hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+      onPress={() => {
+        setDownloadStatus('downloading');
+        onDownloadClick(file);
+      }}
+      activeOpacity={0.7}
+    >
+      <Ionicons name="arrow-down-circle" size={28} color="#10B981" />
+    </TouchableOpacity>
+  );
+}
+
 export default function HomeScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
@@ -339,16 +438,19 @@ export default function HomeScreen({ navigation }) {
       const s = settings || await getSettings();
       const data = await resolveTeraboxLink(s.apiBaseUrl, url, s.downloadQuality, isPremiumUser);
       
+      const folderRawTitle = data.title ? data.title.split('/').filter(Boolean).pop() : '';
+      const folderTitle = folderRawTitle || (data.list && data.list.length > 1 ? `Folder (${data.list.length} Files)` : '');
       const rawList = Array.isArray(data.list) && data.list.length > 0 ? data.list : [data];
       const formattedFiles = rawList.map(item => ({
         name: item.name || item.server_filename || 'video.mp4',
         size: item.size || 'Unknown',
-        thumbnail: item.thumbnail || item.thumbs?.url3 || item.thumbs?.url1 || '',
+        thumbnail: item.thumbnail || item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || item.thumbs?.icon || item.pic || item.image || data.thumbnail || data.thumbs?.url3 || '',
         dlink: item.dlink || item.download_url || data.downloadUrl || '',
         download_url: item.download_url || item.dlink || data.downloadUrl || '',
         stream_url: item.stream_url || data.stream_url || '',
         downloadHeaders: data.downloadHeaders || item.downloadHeaders || {},
         shareUrl: url,
+        folderName: folderTitle,
       })).filter(item => item.dlink || item.download_url);
 
       if (formattedFiles.length === 0) {
@@ -357,9 +459,22 @@ export default function HomeScreen({ navigation }) {
 
       console.log(`[Resolve] Resolved ${formattedFiles.length} file(s) for link`);
       if (formattedFiles.length > 1) {
+        if (!isPremiumUser) {
+          setResult(null);
+          Alert.alert(
+            '⭐ VIP Premium Required',
+            'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
+            [
+              { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
+              { text: 'Cancel', style: 'cancel' },
+            ]
+          );
+          return;
+        }
+
         const folderResult = {
           isFolder: true,
-          name: `Folder (${formattedFiles.length} Files)`,
+          name: folderTitle || `Folder (${formattedFiles.length} Files)`,
           size: `${formattedFiles.length} Files`,
           thumbnail: formattedFiles[0]?.thumbnail || '',
           files: formattedFiles,
@@ -370,17 +485,18 @@ export default function HomeScreen({ navigation }) {
         setResult(formattedFiles[0]);
       }
 
-      // Save resolved link item to history
+      // Save resolved link item to history & sync to MongoDB cloud
       try {
+        const currentUser = user || await getStoredUser();
         await addHistoryItem({
-          name: formattedFiles.length > 1 ? `Folder (${formattedFiles.length} Files)` : formattedFiles[0].name,
+          name: formattedFiles.length > 1 ? (folderTitle || `Folder (${formattedFiles.length} Files)`) : formattedFiles[0].name,
           size: formattedFiles.length > 1 ? `${formattedFiles.length} Files` : formattedFiles[0].size,
           thumbnail: formattedFiles[0]?.thumbnail || '',
           url: url,
           dlink: formattedFiles[0]?.dlink || '',
           stream_url: formattedFiles[0]?.stream_url || '',
           status: 'resolved',
-        });
+        }, currentUser?.email);
       } catch (histErr) {
         console.log('Failed to auto-save history:', histErr.message);
       }
@@ -397,23 +513,26 @@ export default function HomeScreen({ navigation }) {
       Alert.alert('Download Link Missing', 'Could not get download link for this file.');
       return;
     }
+    const folderName = fileItem.folderName || (result && result.isFolder ? result.name : '');
 
     const proceed = async () => {
       try {
-        console.log('[Folder Download] Starting for file:', fileItem.name);
+        console.log('[Folder Download] Starting for file:', fileItem.name, 'Folder:', folderName);
+        const shareUrl = fileItem.shareUrl || result?.shareUrl || input.trim();
         const id = await startDownload(
           fileItem.name,
           dlUrl,
           fileItem.size || 'Unknown',
           fileItem.thumbnail || '',
-          fileItem.downloadHeaders || {}
+          fileItem.downloadHeaders || {},
+          folderName,
+          shareUrl
         );
         console.log('[Folder Download] Started task id:', id);
         const s = settings || await getSettings();
         if (s && s.apiBaseUrl) {
           trackActivity(s.apiBaseUrl, 'download').catch(e => console.log('Track activity failed:', e.message));
         }
-        Alert.alert('📥 Download Started', `"${fileItem.name}" has been added to Downloads.`);
       } catch (err) {
         console.error('[Folder Download] Failed:', err);
         Alert.alert('Download Error', err.message || 'Failed to start download.');
@@ -421,6 +540,32 @@ export default function HomeScreen({ navigation }) {
     };
 
     showAdBeforeAction(proceed);
+  };
+
+  const handleOpenFileOrShare = async (fileItem) => {
+    try {
+      const safeName = (fileItem.name || '').replace(/[^\w\-. ]/g, '_');
+      const fileUri = FileSystem.documentDirectory + safeName;
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (info.exists && info.size > 0) {
+        const isVideo = fileItem.stream_url || (fileItem.name && /\.(mp4|mkv|avi|mov|webm|flv|3gp)$/i.test(fileItem.name));
+        if (isVideo) {
+          setPlayerSource({ url: fileUri, headers: {} });
+          setPlayerName(fileItem.name || 'Video');
+          setPlayerVisible(true);
+        } else {
+          if (await Sharing.isAvailableAsync()) {
+            await Sharing.shareAsync(fileUri);
+          } else {
+            Alert.alert('File Downloaded', `Saved to ${fileUri}`);
+          }
+        }
+      } else {
+        handleDownloadItem(fileItem);
+      }
+    } catch (err) {
+      console.error('Error opening file:', err);
+    }
   };
 
   const handleWatchItem = (fileItem) => {
@@ -447,18 +592,22 @@ export default function HomeScreen({ navigation }) {
 
   const handleDownloadAllFolderFiles = (files) => {
     if (!Array.isArray(files) || files.length === 0) return;
+    const folderName = (result && result.isFolder ? result.name : '') || 'Folder';
     const proceed = async () => {
       try {
         let count = 0;
         for (const f of files) {
           const dlUrl = f.dlink || f.download_url || f.url;
           if (dlUrl) {
+            const shareUrl = f.shareUrl || result?.shareUrl || input.trim();
             await startDownload(
               f.name,
               dlUrl,
               f.size || 'Unknown',
               f.thumbnail || '',
-              f.downloadHeaders || {}
+              f.downloadHeaders || {},
+              f.folderName || folderName,
+              shareUrl
             );
             count++;
           }
@@ -533,12 +682,16 @@ export default function HomeScreen({ navigation }) {
       setTotalBytes(result.size || 'Unknown');
 
       try {
+        const folderName = result?.folderName || (result?.isFolder ? result.name : '');
+        const shareUrl = result?.shareUrl || input.trim();
         const id = await startDownload(
           result.name,
           result.dlink,
           result.size,
           result.thumbnail || '',
-          result.downloadHeaders || {}
+          result.downloadHeaders || {},
+          folderName,
+          shareUrl
         );
         setActiveDownloadId(id);
 
@@ -905,14 +1058,11 @@ export default function HomeScreen({ navigation }) {
                             </TouchableOpacity>
                           ) : null}
 
-                          <TouchableOpacity
-                            style={styles.folderActionIconBtn}
-                            hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
-                            onPress={() => handleDownloadItem(file)}
-                            activeOpacity={0.7}
-                          >
-                            <Ionicons name="arrow-down-circle" size={28} color="#10B981" />
-                          </TouchableOpacity>
+                          <FileDownloadButton
+                            file={file}
+                            onDownloadClick={handleDownloadItem}
+                            onOpenClick={handleOpenFileOrShare}
+                          />
                         </View>
                       </View>
                     );
@@ -1784,5 +1934,22 @@ const styles = StyleSheet.create({
   folderActionIconBtn: {
     padding: 4,
     marginLeft: 6,
+  },
+  circularProgressWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1.5,
+    borderColor: '#10B981',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 6,
+  },
+  circularProgressText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#059669',
+    marginTop: -2,
   },
 });

@@ -27,6 +27,9 @@ export async function resolveTeraboxLink(baseUrl, url, quality = 'auto', isVip =
   if (isVip) {
     headers['x-user-tier'] = 'premium';
     headers['x-is-vip'] = 'true';
+  } else {
+    headers['x-user-tier'] = 'free';
+    headers['x-is-vip'] = 'false';
   }
 
   const res = await fetch(`${endpoint}/parse?${query.toString()}`, {

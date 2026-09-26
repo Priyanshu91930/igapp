@@ -66,11 +66,18 @@ export async function setupFirebaseRemoteNotifications() {
       }
     }
 
-    // Auto-save incoming remote push notifications to local notification history
+    // Auto-save incoming remote push notifications (Firebase FCM) to local notification history
     Notifications.addNotificationReceivedListener((notification) => {
       try {
-        const content = notification?.request?.content;
-        if (content) {
+        const req = notification?.request;
+        const content = req?.content;
+        const trigger = req?.trigger;
+
+        const isPush = trigger && (trigger.type === 'push' || trigger.type === 'remote');
+        const title = (content?.title || '').toLowerCase();
+        const isDownload = title.includes('downloading') || title.includes('download complete') || title.includes('download failed');
+
+        if (content && isPush && !isDownload) {
           import('./notificationStorage').then(({ saveInAppNotification }) => {
             saveInAppNotification({
               title: content.title || 'New Notification',
@@ -85,10 +92,16 @@ export async function setupFirebaseRemoteNotifications() {
     // Handle deep link / URL navigation when user taps a push notification
     Notifications.addNotificationResponseReceivedListener((response) => {
       try {
-        const content = response?.notification?.request?.content;
+        const req = response?.notification?.request;
+        const content = req?.content;
+        const trigger = req?.trigger;
         const data = content?.data;
-        console.log('[Firebase FCM] Push Notification Tapped:', data);
-        if (content) {
+
+        const isPush = trigger && (trigger.type === 'push' || trigger.type === 'remote');
+        const title = (content?.title || '').toLowerCase();
+        const isDownload = title.includes('downloading') || title.includes('download complete') || title.includes('download failed');
+
+        if (content && isPush && !isDownload) {
           import('./notificationStorage').then(({ saveInAppNotification }) => {
             saveInAppNotification({
               title: content.title || 'New Notification',

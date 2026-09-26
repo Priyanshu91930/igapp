@@ -14,10 +14,11 @@ import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Clipboard from 'expo-clipboard';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Screen from '../components/Screen';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { clearHistory, getHistory, removeHistoryItem, getSettings } from '../services/storage';
+import { clearHistory, getHistory, removeHistoryItem, addHistoryItem, getSettings } from '../services/storage';
 import { resolveTeraboxLink } from '../services/api';
 import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
 import { AD_UNIT_IDS } from '../services/adConfig';
@@ -46,12 +47,16 @@ export default function HistoryScreen({ navigation }) {
 
   useFocusEffect(
     useCallback(() => {
-      getStoredUser().then((u) => {
-        setUser(u);
-        getHistory(u?.email).then(setItems);
-      });
+      loadHistory();
     }, [])
   );
+
+  async function loadHistory() {
+    const u = await getStoredUser();
+    setUser(u);
+    const list = await getHistory(u?.email);
+    setItems(list);
+  }
 
   const isPremiumUser = checkIsPremium(user);
 
@@ -103,11 +108,20 @@ export default function HistoryScreen({ navigation }) {
     try {
       const info = await FileSystem.getInfoAsync(fileUri);
       if (info.exists) {
-        await Sharing.shareAsync(fileUri, {
-          dialogTitle: `Open ${item.name}`,
-          UTI: 'public.data',
-        });
-        return;
+        const isVideo = item.stream_url || (item.name && /\.(mp4|mkv|avi|mov|webm|flv|3gp|mp3|m4v)$/i.test(item.name));
+        if (isVideo) {
+          console.log('[HistoryScreen] Opening local downloaded video:', fileUri);
+          setPlayerSource({ url: fileUri, headers: {} });
+          setPlayerName(item.name || 'Video');
+          setPlayerVisible(true);
+          return;
+        } else {
+          await Sharing.shareAsync(fileUri, {
+            dialogTitle: `Open ${item.name}`,
+            UTI: 'public.data',
+          });
+          return;
+        }
       }
     } catch (e) {
       // ignore

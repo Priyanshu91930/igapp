@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import {
   FlatList,
   StyleSheet,
@@ -20,12 +20,14 @@ import Screen from '../components/Screen';
 import { colors, radius, spacing } from '../theme';
 import { getHistory, removeHistoryItem } from '../services/storage';
 import { getStoredUser, checkIsPremium } from '../services/authService';
+import PlayerScreen from './PlayerScreen';
 import {
   addDownloadListener,
   removeDownloadListener,
   pauseDownload,
   resumeDownload,
   cancelDownload,
+  getDownloadMetadata,
 } from '../services/downloadManager';
 
 export default function DownloadScreen() {
@@ -33,6 +35,11 @@ export default function DownloadScreen() {
   const [activeUpdates, setActiveUpdates] = useState({});
   const [bannerAdLoaded, setBannerAdLoaded] = useState(false);
   const [user, setUser] = useState(null);
+
+  // Video player modal state
+  const [playerVisible, setPlayerVisible] = useState(false);
+  const [playerSource, setPlayerSource] = useState(null);
+  const [playerName, setPlayerName] = useState('');
 
   const isPremiumUser = checkIsPremium(user);
 
@@ -46,10 +53,23 @@ export default function DownloadScreen() {
     const stored = await getStoredUser();
     setUser(stored || null);
     const list = await getHistory(stored?.email);
+    const downloadMeta = await getDownloadMetadata();
 
-    // Perform file existence check
+    const IGNORED_SYSTEM_FILES = new Set(['datastore', 'BridgelessReactNativeDevBundle.js', 'manifest.json', 'settings.json']);
+    const SYSTEM_EXTENSIONS = ['.js', '.json', '.db', '.sqlite', '.tmp', '.part', '.log', '.dat', '.bundle'];
+    const MEDIA_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.3gp', '.mp3', '.wav', '.jpg', '.jpeg', '.png', '.zip', '.rar', '.pdf', '.apk', '.m4v', '.ts', '.aac', '.m4a', '.srt', '.vtt', '.txt'];
+
+    const cleanList = list.filter((item) => {
+      if (!item.name) return false;
+      if (IGNORED_SYSTEM_FILES.has(item.name)) return false;
+      const lower = item.name.toLowerCase();
+      if (SYSTEM_EXTENSIONS.some((ext) => lower.endsWith(ext))) return false;
+      return true;
+    });
+
+    // Perform file existence check and attach stored download metadata (folderName, thumbnail)
     const updatedList = await Promise.all(
-      list.map(async (item) => {
+      cleanList.map(async (item) => {
         const safeName = item.name ? item.name.replace(/[^\w\-. ]/g, '_') : 'file';
         const fileUri = FileSystem.documentDirectory + safeName;
         let exists = false;
@@ -59,14 +79,76 @@ export default function DownloadScreen() {
         } catch (e) {
           // ignore
         }
-        return { ...item, fileUri, exists };
+        const meta = downloadMeta[item.name] || {};
+        return {
+          ...item,
+          folderName: item.folderName || meta.folderName || '',
+          thumbnail: item.thumbnail || meta.thumbnail || '',
+          fileUri,
+          exists,
+        };
       })
     );
 
-    // Show ONLY items that are actively downloading/paused, marked as downloaded, or actually exist on disk
-    const actualDownloads = updatedList.filter(
-      (item) => item.exists || item.status === 'downloading' || item.status === 'paused' || item.status === 'downloaded'
-    );
+    // Scan disk for any orphaned files in DocumentDirectory that exist on disk but were missed in history
+    try {
+      const diskFiles = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+      const knownFileUris = new Set(updatedList.map((i) => i.fileUri));
+      const historyByName = new Map(updatedList.map((i) => [i.name, i]));
+
+      for (const fileName of diskFiles) {
+        if (fileName.startsWith('.') || fileName.startsWith('RCT') || fileName.startsWith('Exponent')) continue;
+        if (IGNORED_SYSTEM_FILES.has(fileName)) continue;
+
+        const lowerName = fileName.toLowerCase();
+        if (SYSTEM_EXTENSIONS.some((ext) => lowerName.endsWith(ext))) continue;
+
+        const hasMediaExt = MEDIA_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+        const matchingHist = historyByName.get(fileName);
+        const meta = downloadMeta[fileName] || {};
+
+        if (!hasMediaExt && !matchingHist && !meta.folderName) continue;
+
+        const fileUri = FileSystem.documentDirectory + fileName;
+        if (!knownFileUris.has(fileUri)) {
+          let sizeStr = 'Unknown';
+          try {
+            const info = await FileSystem.getInfoAsync(fileUri);
+            if (info.exists && info.size) {
+              const k = 1024;
+              const i = Math.floor(Math.log(info.size) / Math.log(k));
+              const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+              sizeStr = parseFloat((info.size / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+          } catch (e) {}
+
+          updatedList.push({
+            id: 'disk_' + fileName,
+            name: fileName,
+            size: meta.size || sizeStr,
+            url: matchingHist?.url || meta.url || '',
+            thumbnail: matchingHist?.thumbnail || meta.thumbnail || '',
+            folderName: matchingHist?.folderName || meta.folderName || '',
+            status: 'downloaded',
+            progress: 1,
+            downloadedAt: matchingHist?.downloadedAt || meta.downloadedAt || new Date().toISOString(),
+            fileUri,
+            exists: true,
+          });
+        }
+      }
+    } catch (diskErr) {
+      console.log('Disk scan error:', diskErr.message);
+    }
+
+    // Show ONLY user media files that exist on disk, or are downloading/paused
+    const actualDownloads = updatedList.filter((item) => {
+      if (!item.exists && item.status !== 'downloading' && item.status !== 'paused') return false;
+      if (IGNORED_SYSTEM_FILES.has(item.name)) return false;
+      const lower = (item.name || '').toLowerCase();
+      if (SYSTEM_EXTENSIONS.some((ext) => lower.endsWith(ext))) return false;
+      return true;
+    });
 
     setDownloads(actualDownloads);
   }
@@ -85,7 +167,7 @@ export default function DownloadScreen() {
           ...prev,
           [item.id]: update,
         }));
-        
+
         // If status changes to completed/failed/cancelled, reload list to update layout
         if (
           update.status === 'downloaded' ||
@@ -105,6 +187,36 @@ export default function DownloadScreen() {
         removeDownloadListener(id, activeListeners[id]);
       });
     };
+  }, [downloads]);
+
+  // Group downloads by folderName for clean folder card display
+  const groupedData = useMemo(() => {
+    const groups = [];
+    const folderMap = {};
+
+    downloads.forEach((item) => {
+      let fname = item.folderName ? item.folderName.trim() : '';
+      if (fname) {
+        if (!folderMap[fname]) {
+          folderMap[fname] = {
+            id: 'folder_' + fname,
+            isFolderGroup: true,
+            folderName: fname,
+            items: [],
+          };
+          groups.push(folderMap[fname]);
+        }
+        folderMap[fname].items.push(item);
+      } else {
+        groups.push({
+          id: item.id,
+          isSingleItem: true,
+          item: item,
+        });
+      }
+    });
+
+    return groups;
   }, [downloads]);
 
   async function handleShare(item) {
@@ -133,7 +245,7 @@ export default function DownloadScreen() {
               if (item.exists) {
                 await FileSystem.deleteAsync(item.fileUri, { idempotent: true });
               }
-              const newList = await removeHistoryItem(item.id);
+              await removeHistoryItem(item.id);
               loadDownloads();
             } catch (e) {
               Alert.alert('Error', 'Failed to delete file.');
@@ -144,22 +256,35 @@ export default function DownloadScreen() {
     );
   }
 
+  // 1-Tap Play Handler for downloaded items
   async function handleOpenFile(item) {
     if (!item.exists) {
-      Alert.alert('File not found', 'The local file does not exist anymore.');
+      Alert.alert('File not found', 'The local file does not exist on your device anymore.');
       return;
     }
-    try {
-      await Sharing.shareAsync(item.fileUri, {
-        dialogTitle: `Open ${item.name}`,
-        UTI: 'public.data',
-      });
-    } catch (e) {
-      Alert.alert('Error', 'Failed to open file.');
+    const isVideo = item.stream_url || (item.name && /\.(mp4|mkv|avi|mov|webm|flv|3gp|mp3|m4v)$/i.test(item.name));
+    if (isVideo) {
+      console.log('[DownloadScreen] 1-Tap Play triggered for video:', item.fileUri);
+      setPlayerSource({ url: item.fileUri, headers: {} });
+      setPlayerName(item.name || 'Video');
+      setPlayerVisible(true);
+    } else {
+      try {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(item.fileUri, {
+            dialogTitle: `Open ${item.name}`,
+            UTI: 'public.data',
+          });
+        } else {
+          Alert.alert('File Saved', `Saved to ${item.fileUri}`);
+        }
+      } catch (e) {
+        Alert.alert('Error', 'Failed to open file.');
+      }
     }
   }
 
-  function renderItem({ item }) {
+  function renderSingleFileCard(item, isInsideFolder = false) {
     const liveUpdate = activeUpdates[item.id] || {};
     const status = liveUpdate.status || item.status;
     const isDownloadingOrPaused = status === 'downloading' || status === 'paused';
@@ -173,7 +298,7 @@ export default function DownloadScreen() {
       const totalBytes = liveUpdate.totalBytes || item.size || 'Unknown';
 
       return (
-        <View style={styles.downloadCard}>
+        <View key={item.id} style={[styles.downloadCard, isInsideFolder && styles.innerFolderCard]}>
           <View style={styles.downloadHeader}>
             {item.thumbnail ? (
               <Image source={{ uri: item.thumbnail }} style={styles.thumbnailImage} />
@@ -199,7 +324,6 @@ export default function DownloadScreen() {
           </View>
 
           <View style={styles.progressContainer}>
-            {/* Speed and Time remaining badges */}
             <View style={styles.statsBadgesRow}>
               <View style={styles.statBadge}>
                 <Ionicons name="speedometer-outline" size={12} color="#2563EB" />
@@ -211,7 +335,6 @@ export default function DownloadScreen() {
               </View>
             </View>
 
-            {/* Progress text */}
             <View style={styles.progressTextRow}>
               <Text style={styles.progressBytesText}>
                 {bytesWritten} / {totalBytes}
@@ -221,12 +344,10 @@ export default function DownloadScreen() {
               </Text>
             </View>
 
-            {/* Progress bar */}
             <View style={styles.progressTrack}>
               <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
             </View>
 
-            {/* Controls */}
             <View style={styles.controlButtonsRow}>
               {isPaused ? (
                 <TouchableOpacity
@@ -262,25 +383,37 @@ export default function DownloadScreen() {
       );
     }
 
-    // Normal finished file item
+    // Normal finished file item — 1-tap play enabled!
     return (
       <TouchableOpacity
-        style={styles.card}
+        key={item.id}
+        style={[styles.card, isInsideFolder && styles.innerFolderCard]}
         onPress={() => handleOpenFile(item)}
         activeOpacity={0.8}
       >
         {item.thumbnail ? (
-          <Image source={{ uri: item.thumbnail }} style={styles.thumbnailImageNormal} />
+          <Image
+            source={{
+              uri: item.thumbnail,
+              headers: item.downloadHeaders
+                ? (typeof item.downloadHeaders === 'string'
+                    ? JSON.parse(item.downloadHeaders)
+                    : item.downloadHeaders)
+                : {},
+            }}
+            style={styles.thumbnailImageNormal}
+            resizeMode="cover"
+          />
         ) : (
           <View style={styles.iconWrap}>
-            <Ionicons name="videocam" size={24} color="#6366F1" />
+            <Ionicons name="play-circle" size={24} color="#6366F1" />
           </View>
         )}
         <View style={styles.info}>
           <Text style={styles.name} numberOfLines={2}>
             {item.name}
           </Text>
-          <Text style={styles.size}>{item.size}</Text>
+          <Text style={styles.size}>{item.size} • Tap to Play</Text>
         </View>
 
         <View style={styles.actions}>
@@ -310,6 +443,36 @@ export default function DownloadScreen() {
     );
   }
 
+  function renderGroupItem({ item: group }) {
+    if (group.isFolderGroup) {
+      return (
+        <View style={styles.folderGroupCard}>
+          <View style={styles.folderGroupHeader}>
+            <View style={styles.folderIconBadge}>
+              <Ionicons name="folder-open" size={20} color="#3B82F6" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.folderGroupTitle} numberOfLines={1}>
+                {group.folderName}
+              </Text>
+              <Text style={styles.folderGroupSubtitle}>
+                {group.items.length} file{group.items.length > 1 ? 's' : ''} ready in folder
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.folderDivider} />
+
+          <View style={styles.folderItemsContainer}>
+            {group.items.map((fileItem) => renderSingleFileCard(fileItem, true))}
+          </View>
+        </View>
+      );
+    }
+
+    return renderSingleFileCard(group.item, false);
+  }
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -334,14 +497,24 @@ export default function DownloadScreen() {
           </View>
         ) : (
           <FlatList
-            data={downloads}
-            keyExtractor={(item) => item.id}
+            data={groupedData}
+            keyExtractor={(group) => group.id}
             contentContainerStyle={styles.list}
-            renderItem={renderItem}
+            renderItem={renderGroupItem}
             showsVerticalScrollIndicator={false}
           />
         )}
       </Screen>
+
+      <PlayerScreen
+        visible={playerVisible}
+        url={playerSource?.url}
+        fallbackUrl={playerSource?.fallbackUrl}
+        headers={playerSource?.headers}
+        name={playerName}
+        onClose={() => setPlayerVisible(false)}
+        isPremium={isPremiumUser}
+      />
 
       {/* Banner Ad - Disabled for Premium Users */}
       {!isPremiumUser && (
@@ -388,6 +561,62 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: 0,
     paddingBottom: spacing.xl,
+  },
+  folderGroupCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  folderGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  folderIconBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  folderGroupTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1E293B',
+  },
+  folderGroupSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  folderDivider: {
+    height: 1,
+    backgroundColor: '#E2E8F0',
+    marginVertical: 10,
+  },
+  folderItemsContainer: {
+    marginTop: 2,
+  },
+  innerFolderCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    elevation: 0,
+    shadowOpacity: 0,
   },
   card: {
     flexDirection: 'row',

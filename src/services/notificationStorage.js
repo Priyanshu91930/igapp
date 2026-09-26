@@ -20,10 +20,23 @@ function notifyNotificationListeners() {
   });
 }
 
+function isDownloadRelatedNotification(title = '', body = '') {
+  const t = String(title).toLowerCase();
+  const b = String(body).toLowerCase();
+  if (t.includes('downloading') || t.includes('download complete') || t.includes('download failed')) {
+    return true;
+  }
+  if (b.includes('.mp4') || b.includes('.mkv') || b.includes('mb/s') || b.includes('%') || b.includes('left')) {
+    return true;
+  }
+  return false;
+}
+
 export async function getInAppNotifications() {
   try {
     const raw = await AsyncStorage.getItem(NOTIFICATIONS_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const list = raw ? JSON.parse(raw) : [];
+    return list.filter((item) => !isDownloadRelatedNotification(item.title, item.body));
   } catch (e) {
     return [];
   }
@@ -31,6 +44,11 @@ export async function getInAppNotifications() {
 
 export async function saveInAppNotification({ title, body, data = {}, time = null }) {
   try {
+    if (isDownloadRelatedNotification(title, body)) {
+      console.log('[NotificationStorage] Skipping local download notification:', title);
+      return await getInAppNotifications();
+    }
+
     const current = await getInAppNotifications();
     const newItem = {
       id: String(Date.now() + Math.random()),

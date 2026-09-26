@@ -89,15 +89,24 @@ function formatTimeRemaining(seconds) {
 
 // Notify all listeners of changes to an active download
 function notifyListeners(id, data) {
-  if (listeners[id]) {
-    listeners[id].forEach((cb) => {
-      try {
-        cb(data);
-      } catch (e) {
-        // ignore
-      }
-    });
-  }
+  const inst = activeInstances[id];
+  const fileName = inst?.name || data?.name || data?.fileName;
+  const keys = [id, fileName].filter(Boolean);
+  const notified = new Set();
+  keys.forEach((key) => {
+    if (listeners[key]) {
+      listeners[key].forEach((cb) => {
+        if (!notified.has(cb)) {
+          notified.add(cb);
+          try {
+            cb({ ...data, id, fileName });
+          } catch (e) {
+            // ignore
+          }
+        }
+      });
+    }
+  });
 }
 
 // Main progress callback used by the legacy single-connection downloader
@@ -134,6 +143,7 @@ function createProgressCallback(id, fileName, totalSizeStr, startTime) {
     }
 
     const update = {
+      fileName,
       progress,
       downloadSpeed: speed,
       timeRemaining,
@@ -163,6 +173,7 @@ function runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size) {
   );
 
   activeInstances[id] = download;
+  activeInstances[id].name = name;
 
   (async () => {
     try {
@@ -172,7 +183,7 @@ function runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size) {
           throw new Error(`Server returned HTTP status ${result.status}`);
         }
         await updateHistoryStatus(id, 'downloaded', 1);
-        notifyListeners(id, { status: 'downloaded', progress: 1 });
+        notifyListeners(id, { status: 'downloaded', progress: 1, fileName: name });
         await showDownloadCompleteNotification(id, name);
         delete activeInstances[id];
         delete lastProgressTime[id];
@@ -182,7 +193,7 @@ function runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size) {
         return;
       }
       await updateHistoryStatus(id, 'failed', 0);
-      notifyListeners(id, { status: 'failed', progress: 0, error: e.message });
+      notifyListeners(id, { status: 'failed', progress: 0, error: e.message, fileName: name });
       await showDownloadFailedNotification(id, name);
       delete activeInstances[id];
       delete lastProgressTime[id];
@@ -210,6 +221,7 @@ function runSegmented(id, name, fileUri, downloadUrl, downloadHeaders, totalByte
   });
 
   activeInstances[id] = {
+    name,
     type: 'segmented',
     seg,
     pause: async () => {
@@ -261,28 +273,57 @@ function runSegmented(id, name, fileUri, downloadUrl, downloadHeaders, totalByte
   })();
 }
 
-export async function startDownload(name, downloadUrl, size = 'Unknown', thumbnail = '', downloadHeaders = {}) {
+const DOWNLOAD_META_KEY = '@teraapp/download_metadata';
+
+export async function saveDownloadMetadata(item) {
+  try {
+    const raw = await AsyncStorage.getItem(DOWNLOAD_META_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    if (item && item.name) {
+      map[item.name] = {
+        name: item.name,
+        size: item.size || 'Unknown',
+        thumbnail: item.thumbnail || '',
+        folderName: item.folderName || '',
+        url: item.url || '',
+        downloadedAt: item.downloadedAt || new Date().toISOString(),
+      };
+      await AsyncStorage.setItem(DOWNLOAD_META_KEY, JSON.stringify(map));
+    }
+  } catch (e) {}
+}
+
+export async function getDownloadMetadata() {
+  try {
+    const raw = await AsyncStorage.getItem(DOWNLOAD_META_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+export async function startDownload(name, downloadUrl, size = 'Unknown', thumbnail = '', downloadHeaders = {}, folderName = '', shareUrl = '') {
   const safeName = name.replace(/[^\w\-. ]/g, '_');
   const fileUri = FileSystem.documentDirectory + safeName;
   const id = String(Date.now());
 
-  // Add a new entry to the history table as downloading
+  // Add a new entry to the history table as downloading and sync with Cloud
   const historyItem = {
     id,
     name,
     size,
-    url: downloadUrl,
+    url: shareUrl || downloadUrl,
+    dlink: downloadUrl,
     thumbnail,
     status: 'downloading',
     progress: 0,
     downloadedAt: new Date().toISOString(),
-    downloadHeaders: JSON.stringify(downloadHeaders)
+    downloadHeaders: JSON.stringify(downloadHeaders),
+    folderName: folderName || '',
   };
 
-  // Pre-load items into local storage
-  const history = await getHistory();
-  const next = [historyItem, ...history];
-  await AsyncStorage.setItem('@teraapp/history', JSON.stringify(next.slice(0, 100)));
+  await saveDownloadMetadata(historyItem);
+  await addHistoryItem(historyItem);
 
   // Ensure Android Notification Channel is created and initialized
   await setupNotificationChannel();
@@ -541,14 +582,16 @@ async function updateHistoryStatus(id, status, progress = null, resumeDataJson =
 
 // Register real-time progress callbacks
 export function addDownloadListener(id, cb) {
+  if (!id) return () => {};
   if (!listeners[id]) {
     listeners[id] = [];
   }
   listeners[id].push(cb);
+  return () => removeDownloadListener(id, cb);
 }
 
 export function removeDownloadListener(id, cb) {
-  if (listeners[id]) {
+  if (id && listeners[id]) {
     listeners[id] = listeners[id].filter((x) => x !== cb);
   }
 }

@@ -9,6 +9,8 @@ import {
   Alert,
   Linking,
   Modal,
+  Animated,
+  Easing,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -32,6 +34,197 @@ GoogleSignin.configure({
   webClientId: '127142107297-eqjrnnvko66pn6014ndesqimqbtof3ll.apps.googleusercontent.com',
   offlineAccess: false,
 });
+
+export function getExpiryDetails(user) {
+  const isPremium = checkIsPremium(user);
+  if (!isPremium) {
+    return {
+      isPremium: false,
+      daysLeft: 0,
+      formattedDate: 'N/A',
+      dayOfWeek: 'N/A',
+      fullDayName: 'N/A',
+      fullDateStr: 'No Active Plan',
+    };
+  }
+
+  let expiryDate;
+  if (user?.premiumExpiresAt) {
+    expiryDate = new Date(user.premiumExpiresAt);
+    if (isNaN(expiryDate.getTime())) {
+      expiryDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+    }
+  } else {
+    expiryDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  }
+
+  const diffMs = expiryDate.getTime() - Date.now();
+  const daysLeft = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+
+  const dayOfWeek = expiryDate.toLocaleDateString('en-US', { weekday: 'short' });
+  const fullDayName = expiryDate.toLocaleDateString('en-US', { weekday: 'long' });
+  const dateStr = expiryDate.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
+
+  return {
+    isPremium: true,
+    daysLeft,
+    dayOfWeek,
+    fullDayName,
+    formattedDate: dateStr,
+    fullDateStr: `${fullDayName}, ${dateStr}`,
+  };
+}
+
+function AnimatedExpiryHeaderBadge({ expiryDetails }) {
+  const pulseAnim = React.useRef(new Animated.Value(1)).current;
+  const fadeAnim = React.useRef(new Animated.Value(1)).current;
+  const translateY = React.useRef(new Animated.Value(0)).current;
+  const [activeSlide, setActiveSlide] = React.useState(0);
+
+  React.useEffect(() => {
+    const pulseLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.05,
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 1200,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulseLoop.start();
+
+    const interval = setInterval(() => {
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(fadeAnim, { toValue: 0, duration: 250, useNativeDriver: true }),
+          Animated.timing(translateY, { toValue: -6, duration: 250, useNativeDriver: true }),
+        ]),
+        Animated.timing(translateY, { toValue: 6, duration: 0, useNativeDriver: true }),
+      ]).start(() => {
+        setActiveSlide((prev) => (prev + 1) % 2);
+        Animated.parallel([
+          Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }),
+          Animated.timing(translateY, { toValue: 0, duration: 250, useNativeDriver: true }),
+        ]).start();
+      });
+    }, 3000);
+
+    return () => {
+      pulseLoop.stop();
+      clearInterval(interval);
+    };
+  }, [pulseAnim, fadeAnim, translateY]);
+
+  if (!expiryDetails.isPremium) return null;
+
+  return (
+    <Animated.View style={{ transform: [{ scale: pulseAnim }], marginTop: 6, alignItems: 'center' }}>
+      <LinearGradient
+        colors={['#10B981', '#059669']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={styles.expiryHeaderPill}
+      >
+        <Ionicons name="time-outline" size={13} color="#FFFFFF" />
+        <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY }] }}>
+          {activeSlide === 0 ? (
+            <Text style={styles.expiryHeaderPillText}>
+              🗓️ {expiryDetails.dayOfWeek}, {expiryDetails.formattedDate}
+            </Text>
+          ) : (
+            <Text style={styles.expiryHeaderPillHighlightText}>
+              ⚡ {expiryDetails.daysLeft} Days Left ({expiryDetails.dayOfWeek})
+            </Text>
+          )}
+        </Animated.View>
+      </LinearGradient>
+    </Animated.View>
+  );
+}
+
+function AnimatedManageExpiryCard({ expiryDetails, isLoggedIn, user }) {
+  const glowAnim = React.useRef(new Animated.Value(0.4)).current;
+  const badgePulse = React.useRef(new Animated.Value(1)).current;
+
+  React.useEffect(() => {
+    const glowLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glowAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        Animated.timing(glowAnim, { toValue: 0.4, duration: 1000, useNativeDriver: true }),
+      ])
+    );
+    const pulseLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(badgePulse, { toValue: 1.08, duration: 800, useNativeDriver: true }),
+        Animated.timing(badgePulse, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    );
+
+    glowLoop.start();
+    pulseLoop.start();
+
+    return () => {
+      glowLoop.stop();
+      pulseLoop.stop();
+    };
+  }, [glowAnim, badgePulse]);
+
+  return (
+    <LinearGradient colors={['#1E293B', '#0F172A']} style={styles.manageStatusCard}>
+      <View style={styles.manageStatusBadgeRow}>
+        <View style={styles.manageStatusBadge}>
+          <Ionicons name="checkmark-circle" size={14} color="#10B981" />
+          <Text style={styles.manageStatusBadgeText}>
+            {expiryDetails.isPremium ? '★ VIP MEMBERSHIP ACTIVE' : 'FREE USER'}
+          </Text>
+        </View>
+        {expiryDetails.isPremium && (
+          <View style={styles.livePulseContainer}>
+            <Animated.View style={[styles.livePulseDot, { opacity: glowAnim }]} />
+            <Text style={styles.livePulseText}>ACTIVE</Text>
+          </View>
+        )}
+      </View>
+
+      <Text style={styles.managePlanName}>
+        {expiryDetails.isPremium ? `${user?.plan ? user.plan.toUpperCase() : 'YEARLY'} VIP PLAN` : 'No Active Plan'}
+      </Text>
+
+      {expiryDetails.isPremium ? (
+        <View style={styles.expiryDetailCardBox}>
+          <View style={styles.expiryDetailRow}>
+            <Ionicons name="calendar-outline" size={16} color="#38BDF8" />
+            <Text style={styles.expiryDetailDateLabel}>Expires On:</Text>
+            <Text style={styles.expiryDetailDateValue}>
+              {expiryDetails.fullDateStr}
+            </Text>
+          </View>
+
+          <View style={styles.expiryDaysBannerRow}>
+            <Text style={styles.expiryDaysTitle}>Days Remaining:</Text>
+            <Animated.View style={[styles.daysLeftPill, { transform: [{ scale: badgePulse }] }]}>
+              <LinearGradient colors={['#F59E0B', '#D97706']} style={styles.daysLeftPillGradient}>
+                <Ionicons name="flame" size={13} color="#FFFFFF" />
+                <Text style={styles.daysLeftPillText}>{expiryDetails.daysLeft} Days Left</Text>
+              </LinearGradient>
+            </Animated.View>
+          </View>
+        </View>
+      ) : (
+        <Text style={styles.manageExpiryText}>Upgrade to unlock all premium features</Text>
+      )}
+
+      <Text style={styles.manageEmailText}>Linked Account: {isLoggedIn ? user.email : 'Not Logged In'}</Text>
+    </LinearGradient>
+  );
+}
 
 export default function SettingsScreen({ navigation }) {
   const insets = useSafeAreaInsets();
@@ -73,6 +266,7 @@ export default function SettingsScreen({ navigation }) {
 
   const isLoggedIn = !!(user && user.email);
   const isPremiumUser = checkIsPremium(user);
+  const expiryDetails = getExpiryDetails(user);
 
   async function handleOneTapGoogleSignIn() {
     setLoggingIn(true);
@@ -180,10 +374,13 @@ export default function SettingsScreen({ navigation }) {
 
           <View style={styles.badgeRow}>
             {isPremiumUser ? (
-              <LinearGradient colors={['#F59E0B', '#D97706']} style={styles.vipBadge}>
-                <Ionicons name="star" size={11} color="#FFFFFF" />
-                <Text style={styles.vipBadgeText}>★ VIP PREMIUM MEMBER</Text>
-              </LinearGradient>
+              <View style={styles.badgeColumn}>
+                <LinearGradient colors={['#F59E0B', '#D97706']} style={styles.vipBadge}>
+                  <Ionicons name="star" size={11} color="#FFFFFF" />
+                  <Text style={styles.vipBadgeText}>★ VIP PREMIUM MEMBER</Text>
+                </LinearGradient>
+                <AnimatedExpiryHeaderBadge expiryDetails={expiryDetails} />
+              </View>
             ) : (
               <TouchableOpacity
                 style={styles.upgradeBadge}
@@ -252,7 +449,9 @@ export default function SettingsScreen({ navigation }) {
               <View style={styles.rowTextCol}>
                 <Text style={styles.rowLabel}>Manage Premium</Text>
                 <Text style={styles.rowSubtitle}>
-                  {isPremiumUser ? 'View active plan, expiry & 6 unlocked features' : 'Tap to view membership benefits'}
+                  {isPremiumUser
+                    ? `${expiryDetails.daysLeft} Days Left • Expires ${expiryDetails.dayOfWeek}, ${expiryDetails.formattedDate}`
+                    : 'Tap to view membership benefits'}
                 </Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color="#A1A1AA" />
@@ -385,21 +584,7 @@ export default function SettingsScreen({ navigation }) {
 
             <ScrollView contentContainerStyle={styles.manageBody} showsVerticalScrollIndicator={false}>
               {/* Active Membership Banner Card */}
-              <LinearGradient colors={['#1E293B', '#0F172A']} style={styles.manageStatusCard}>
-                <View style={styles.manageStatusBadge}>
-                  <Ionicons name="checkmark-circle" size={14} color="#10B981" />
-                  <Text style={styles.manageStatusBadgeText}>
-                    {isPremiumUser ? '★ VIP MEMBERSHIP ACTIVE' : 'FREE USER'}
-                  </Text>
-                </View>
-                <Text style={styles.managePlanName}>
-                  {isPremiumUser ? `${user?.plan ? user.plan.toUpperCase() : 'YEARLY'} VIP PLAN` : 'No Active Plan'}
-                </Text>
-                <Text style={styles.manageExpiryText}>
-                  {isPremiumUser ? 'Valid Status: Active & Valid until 2027' : 'Upgrade to unlock all premium features'}
-                </Text>
-                <Text style={styles.manageEmailText}>Linked Account: {isLoggedIn ? user.email : 'Not Logged In'}</Text>
-              </LinearGradient>
+              <AnimatedManageExpiryCard expiryDetails={expiryDetails} isLoggedIn={isLoggedIn} user={user} />
 
               {/* Unlocked Features List */}
               <Text style={styles.manageSectionHeading}>✨ Features Included in Subscription:</Text>
@@ -840,6 +1025,116 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     paddingVertical: 14,
+  },
+  badgeColumn: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  expiryHeaderPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 14,
+    elevation: 2,
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  expiryHeaderPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  expiryHeaderPillHighlightText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FEF08A',
+  },
+  manageStatusBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  livePulseContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+  },
+  livePulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  livePulseText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#10B981',
+    letterSpacing: 0.5,
+  },
+  expiryDetailCardBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 12,
+    padding: 12,
+    marginVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    gap: 10,
+  },
+  expiryDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  expiryDetailDateLabel: {
+    fontSize: 12,
+    color: '#94A3B8',
+    fontWeight: '600',
+  },
+  expiryDetailDateValue: {
+    fontSize: 13,
+    color: '#F8FAFC',
+    fontWeight: '700',
+    flex: 1,
+  },
+  expiryDaysBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.08)',
+    paddingTop: 8,
+  },
+  expiryDaysTitle: {
+    fontSize: 12,
+    color: '#CBD5E1',
+    fontWeight: '600',
+  },
+  daysLeftPill: {
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  daysLeftPillGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  daysLeftPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#FFFFFF',
   },
   extendBtnText: {
     fontSize: 15,

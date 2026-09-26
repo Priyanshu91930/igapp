@@ -39,6 +39,17 @@ export default function NotificationCenterModal({
   notifications = [],
   onClear,
 }) {
+  const filteredNotifications = (notifications || []).filter((item) => {
+    const title = (item?.title || '').toLowerCase();
+    const body = (item?.body || '').toLowerCase();
+    if (title.includes('downloading') || title.includes('download complete') || title.includes('download failed')) {
+      return false;
+    }
+    if (body.includes('.mp4') || body.includes('.mkv') || body.includes('mb/s') || body.includes('%')) {
+      return false;
+    }
+    return true;
+  });
   const handleItemPress = (item) => {
     const targetUrl = item.data?.url || item.url;
     if (targetUrl) {
@@ -133,15 +144,15 @@ export default function NotificationCenterModal({
                 <Ionicons name="notifications" size={18} color="#6366F1" />
               </View>
               <Text style={styles.headerTitle}>Notification Center</Text>
-              {notifications.length > 0 && (
+              {filteredNotifications.length > 0 && (
                 <View style={styles.countBadge}>
-                  <Text style={styles.countBadgeText}>{notifications.length}</Text>
+                  <Text style={styles.countBadgeText}>{filteredNotifications.length}</Text>
                 </View>
               )}
             </View>
 
             <View style={styles.headerActions}>
-              {notifications.length > 0 && (
+              {filteredNotifications.length > 0 && (
                 <TouchableOpacity
                   style={styles.clearBtn}
                   onPress={handleClearAll}
@@ -161,7 +172,7 @@ export default function NotificationCenterModal({
           </View>
 
           {/* List or Empty State */}
-          {notifications.length === 0 ? (
+          {filteredNotifications.length === 0 ? (
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconCircle}>
                 <Ionicons name="notifications-off-outline" size={40} color="#94A3B8" />
@@ -173,7 +184,7 @@ export default function NotificationCenterModal({
             </View>
           ) : (
             <FlatList
-              data={notifications}
+              data={filteredNotifications}
               keyExtractor={(item, index) => item.id || String(index)}
               renderItem={renderNotificationItem}
               contentContainerStyle={styles.listContent}
