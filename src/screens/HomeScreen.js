@@ -1,1310 +1,548 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useState } from 'react';
 import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
+  View,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  StyleSheet,
+  ScrollView,
   Image,
+  ActivityIndicator,
   Alert,
-  Linking,
+  SafeAreaView,
+  StatusBar,
+  Dimensions,
+  Platform,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useIsFocused } from '@react-navigation/native';
-import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
-import { BannerAd, BannerAdSize, RewardedAd, RewardedAdEventType, AdEventType } from 'react-native-google-mobile-ads';
-import { AD_UNIT_IDS } from '../services/adConfig';
-import { colors, radius, spacing } from '../theme';
-import { extractTeraboxUrl, resolveTeraboxLink, trackActivity } from '../services/api';
-import { getSettings, getHistory, addHistoryItem } from '../services/storage';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { BannerAd, BannerAdSize } from 'react-native-google-mobile-ads';
+
+import { gradientColors, lightTheme, spacing, radius, typography } from '../theme';
+import { validateInstagramUrl, resolveInstagramMedia } from '../services/InstagramDownloaderService';
+import { downloadInstagramMedia, cancelDownload, shareFile } from '../services/downloadManager';
+import { getSettings } from '../services/storage';
+import { AD_UNIT_IDS, ADS_ENABLED } from '../services/adConfig';
 import ShareSheet from '../components/ShareSheet';
-import SubscriptionModal from '../components/SubscriptionModal';
-import { checkAndPromptInAppReview } from '../services/storeReview';
-import { getStoredUser, fetchFreshUserStatus, checkIsPremium } from '../services/authService';
-import PlayerScreen from './PlayerScreen';
-import UpdateBannerTicker from '../components/UpdateBannerTicker';
-import {
-  startDownload,
-  pauseDownload,
-  resumeDownload,
-  cancelDownload,
-  addDownloadListener,
-  removeDownloadListener,
-} from '../services/downloadManager';
+import VideoPlayerModal from '../components/VideoPlayerModal';
 
-function FileDownloadButton({ file, onDownloadClick, onOpenClick }) {
-  const [downloadStatus, setDownloadStatus] = useState('idle'); // 'idle' | 'downloading' | 'downloaded'
-  const [downloadProgress, setDownloadProgress] = useState(0);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const checkFileStatus = async () => {
-      try {
-        const safeName = (file.name || '').replace(/[^\w\-. ]/g, '_');
-        const fileUri = FileSystem.documentDirectory + safeName;
-        const info = await FileSystem.getInfoAsync(fileUri);
-
-        if (info.exists && info.size > 0) {
-          if (isMounted) {
-            setDownloadStatus('downloaded');
-            setDownloadProgress(1);
-          }
-          return;
-        }
-
-        const history = await getHistory();
-        const existing = history.find((h) => h.name === file.name);
-        if (existing && isMounted) {
-          if (existing.status === 'downloaded') {
-            setDownloadStatus('downloaded');
-            setDownloadProgress(1);
-          } else if (existing.status === 'downloading') {
-            setDownloadStatus('downloading');
-            setDownloadProgress(existing.progress || 0);
-          }
-        }
-      } catch (err) {
-        // ignore
-      }
-    };
-
-    checkFileStatus();
-
-    const unsub = addDownloadListener(file.name, (update) => {
-      if (!isMounted) return;
-      if (update.status === 'downloading') {
-        setDownloadStatus('downloading');
-        if (typeof update.progress === 'number') {
-          setDownloadProgress(update.progress);
-        }
-      } else if (update.status === 'downloaded') {
-        setDownloadStatus('downloaded');
-        setDownloadProgress(1);
-      } else if (update.status === 'failed' || update.status === 'cancelled') {
-        setDownloadStatus('idle');
-        setDownloadProgress(0);
-      }
-    });
-
-    return () => {
-      isMounted = false;
-      unsub();
-    };
-  }, [file.name]);
-
-  if (downloadStatus === 'downloaded') {
-    return (
-      <TouchableOpacity
-        style={styles.folderActionIconBtn}
-        hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
-        onPress={() => onOpenClick && onOpenClick(file)}
-        activeOpacity={0.7}
-      >
-        <Ionicons name="checkmark-circle" size={28} color="#10B981" />
-      </TouchableOpacity>
-    );
-  }
-
-  if (downloadStatus === 'downloading') {
-    const pct = Math.round(downloadProgress * 100);
-    return (
-      <View style={styles.circularProgressWrap}>
-        <ActivityIndicator size="small" color="#10B981" />
-        <Text style={styles.circularProgressText}>{pct > 0 ? `${pct}%` : '0%'}</Text>
-      </View>
-    );
-  }
-
-  return (
-    <TouchableOpacity
-      style={styles.folderActionIconBtn}
-      hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
-      onPress={() => {
-        setDownloadStatus('downloading');
-        onDownloadClick(file);
-      }}
-      activeOpacity={0.7}
-    >
-      <Ionicons name="arrow-down-circle" size={28} color="#10B981" />
-    </TouchableOpacity>
-  );
-}
+const { width } = Dimensions.get('window');
 
 export default function HomeScreen({ navigation }) {
   const insets = useSafeAreaInsets();
-  const isFocused = useIsFocused();
-  const [settings, setSettings] = useState(null);
-  const [input, setInput] = useState('');
-  const [parsing, setParsing] = useState(false);
+  const topPadding = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 0);
+
+  const [inputUrl, setInputUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [resolvedMedia, setResolvedMedia] = useState(null);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [showPlayerModal, setShowPlayerModal] = useState(false);
+  const [showSupportedFormats, setShowSupportedFormats] = useState(false);
+
+  // Downloading State & Image 2 Detailed Metrics
   const [downloading, setDownloading] = useState(false);
-  const [error, setError] = useState('');
-  const [result, setResult] = useState(null);
-  const [progress, setProgress] = useState(0);
-
-  // State to track the active download from downloadManager
-  const [activeDownloadId, setActiveDownloadId] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
-  const [adLoaded, setAdLoaded] = useState(false);
-  const [showMirrors, setShowMirrors] = useState(false);
-  const [showShareSheet, setShowShareSheet] = useState(false);
-  const [bannerAdLoaded, setBannerAdLoaded] = useState(false);
-  const [topBannerAdLoaded, setTopBannerAdLoaded] = useState(false);
-  const [showTopBanner, setShowTopBanner] = useState(false);
-  const [bannerAdError, setBannerAdError] = useState(false);
-  const [topBannerAdError, setTopBannerAdError] = useState(false);
+  const [downloadStats, setDownloadStats] = useState({
+    percentage: 0,
+    written: '0 B',
+    total: 'Unknown',
+    speed: '2.4 MB/s',
+    timeRemaining: '0s',
+  });
+  const [downloadSuccess, setDownloadSuccess] = useState(null);
 
-  // Stagger Top Banner Ad request by 2.5s to prevent simultaneous AdMob collision with Bottom Banner
-  useEffect(() => {
-    if (isPremiumUser) return;
-    const timer = setTimeout(() => {
-      setShowTopBanner(true);
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, [isPremiumUser]);
+  const theme = lightTheme;
 
-  // User Auth & Subscription Modal states
-  const [user, setUser] = useState(null);
-  const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
-
-  const isPremiumUser = checkIsPremium(user);
-
-  useEffect(() => {
-    if (isFocused) {
-      (async () => {
-        const stored = await getStoredUser();
-        setUser(stored || null);
-        if (stored && stored.email) {
-          const fresh = await fetchFreshUserStatus(stored.email);
-          if (fresh) setUser(fresh);
-        }
-      })();
-    }
-  }, [isFocused]);
-
-  // In-app video player state
-  const [playerVisible, setPlayerVisible] = useState(false);
-  const [playerSource, setPlayerSource] = useState(null); // { url, headers }
-  const [playerName, setPlayerName] = useState(null);
-
-  // Reference for rewarded interstitial
-  const rewardedInterstitialRef = useRef(null);
-
-  useEffect(() => {
-    if (isPremiumUser) {
-      setAdLoaded(false);
-      return;
-    }
-    rewardedInterstitialRef.current = RewardedAd.createForAdRequest(AD_UNIT_IDS.REWARDED, {});
-
-    const unsubscribeLoaded = rewardedInterstitialRef.current.addAdEventListener(
-      RewardedAdEventType.LOADED,
-      () => {
-        console.log('Rewarded Interstitial Ad loaded.');
-        setAdLoaded(true);
+  const handlePaste = async () => {
+    try {
+      const text = await Clipboard.getStringAsync();
+      if (text) {
+        setInputUrl(text);
+        setErrorMsg('');
       }
-    );
-
-    const unsubscribeEarned = rewardedInterstitialRef.current.addAdEventListener(
-      RewardedAdEventType.EARNED_REWARD,
-      (reward) => {
-        console.log('User earned reward of ', reward);
-      }
-    );
-
-    const unsubscribeClosed = rewardedInterstitialRef.current.addAdEventListener(
-      AdEventType.CLOSED,
-      () => {
-        setAdLoaded(false);
-        console.log('Rewarded Interstitial Ad closed, pre-loading next one...');
-        rewardedInterstitialRef.current.load();
-      }
-    );
-
-    rewardedInterstitialRef.current.load();
-
-    return () => {
-      unsubscribeLoaded();
-      unsubscribeEarned();
-      unsubscribeClosed();
-    };
-  }, [isPremiumUser]);
-  const [downloadSpeed, setDownloadSpeed] = useState('0 KB/s');
-  const [timeRemaining, setTimeRemaining] = useState('--');
-  const [bytesWritten, setBytesWritten] = useState('0 MB');
-  const [totalBytes, setTotalBytes] = useState('0 MB');
-
-  useEffect(() => {
-    loadSettings();
-    const unsub = navigation.addListener('focus', loadSettings);
-    return unsub;
-  }, [navigation]);
-
-  async function loadSettings() {
-    const s = await getSettings();
-    setSettings(s);
-  }
-
-  // Real-time listener for the active download ID
-  useEffect(() => {
-    if (activeDownloadId) {
-      const handleUpdate = (update) => {
-        if (update.status === 'downloaded') {
-          setProgress(1);
-          setDownloading(false);
-          setActiveDownloadId(null);
-          Alert.alert('Download Complete', 'File downloaded successfully.');
-          checkAndPromptInAppReview();
-        } else if (update.status === 'failed') {
-          setError(update.error || 'Download failed.');
-          setDownloading(false);
-          setActiveDownloadId(null);
-        } else if (update.status === 'cancelled') {
-          setDownloading(false);
-          setActiveDownloadId(null);
-          setProgress(0);
-        } else if (update.status === 'paused') {
-          setIsPaused(true);
-        } else if (update.status === 'downloading') {
-          setIsPaused(false);
-          setProgress(update.progress || 0);
-          setDownloadSpeed(update.downloadSpeed || '0 KB/s');
-          setTimeRemaining(update.timeRemaining || '--');
-          setBytesWritten(update.bytesWritten || '0 MB');
-          setTotalBytes(update.totalBytes || '0 MB');
-        }
-      };
-
-      addDownloadListener(activeDownloadId, handleUpdate);
-      return () => removeDownloadListener(activeDownloadId, handleUpdate);
+    } catch (e) {
+      console.log('Clipboard read failed', e);
     }
-  }, [activeDownloadId]);
-
-  async function pasteFromClipboard() {
-    const text = await Clipboard.getStringAsync();
-    if (text) {
-      setInput(text);
-      setError('');
-    }
-  }
-
-  function validate() {
-    const url = extractTeraboxUrl(input);
-    if (!url) {
-      setError('Invalid share link. Please paste a valid TeraBox link.');
-      return null;
-    }
-    setError('');
-    return url;
-  }
-
-  const showAdBeforeAction = (actionCallback) => {
-    if (isPremiumUser || !rewardedInterstitialRef.current) {
-      actionCallback();
-      return;
-    }
-
-    if (adLoaded) {
-      try {
-        console.log('[HomeScreen] Showing Rewarded Ad before button action...');
-        let executed = false;
-        const safeExecute = () => {
-          if (!executed) {
-            executed = true;
-            actionCallback();
-          }
-        };
-
-        const timer = setTimeout(() => {
-          console.warn('[HomeScreen] Ad timeout fallback triggered');
-          safeExecute();
-        }, 8000);
-
-        const unsubClose = rewardedInterstitialRef.current.addAdEventListener(
-          AdEventType.CLOSED,
-          () => {
-            clearTimeout(timer);
-            try { unsubClose(); } catch (e) {}
-            setAdLoaded(false);
-            rewardedInterstitialRef.current?.load();
-            safeExecute();
-          }
-        );
-        rewardedInterstitialRef.current.show();
-        return;
-      } catch (err) {
-        console.log('[HomeScreen] Failed to show rewarded ad:', err);
-        actionCallback();
-        return;
-      }
-    }
-    actionCallback();
   };
 
-  async function handleResolve() {
-    const url = validate();
-    if (!url) return;
+  const handleClear = () => {
+    setInputUrl('');
+    setErrorMsg('');
+    setResolvedMedia(null);
+    setDownloadSuccess(null);
+    setIsPaused(false);
+  };
 
-    // Show rewarded ad first ONLY for free users if available, then resolve
-    if (!isPremiumUser && rewardedInterstitialRef.current) {
-      if (adLoaded) {
-        // Condition 1: Ad is ALREADY loaded -> Show immediately with 0 delay
-        try {
-          console.log('Showing Rewarded Ad immediately before resolve...');
-          const unsubClose = rewardedInterstitialRef.current.addAdEventListener(
-            AdEventType.CLOSED,
-            () => {
-              unsubClose();
-              setAdLoaded(false);
-              rewardedInterstitialRef.current?.load(); // preload next
-              doResolve(url);
-            }
-          );
-          rewardedInterstitialRef.current.show();
-          return; // wait for ad to close
-        } catch (err) {
-          console.log('Failed to show rewarded ad:', err);
-        }
-      } else {
-        // Condition 2: Ad is NOT loaded yet -> Show spinner & wait up to 2.5s for ad load
-        console.log('Ad not loaded yet, waiting up to 2.5s for ad load...');
-        setParsing(true);
-
-        const isAdShowAttempted = { current: false };
-
-        const waitForAdPromise = new Promise((resolve) => {
-          let timeoutId = null;
-          let unsubLoaded = null;
-
-          const finish = (wasLoaded) => {
-            if (isAdShowAttempted.current) return;
-            isAdShowAttempted.current = true;
-            if (timeoutId) clearTimeout(timeoutId);
-            if (unsubLoaded) unsubLoaded();
-            resolve(wasLoaded);
-          };
-
-          unsubLoaded = rewardedInterstitialRef.current.addAdEventListener(
-            RewardedAdEventType.LOADED,
-            () => {
-              console.log('Rewarded Ad loaded during 2.5s wait window!');
-              setAdLoaded(true);
-              finish(true);
-            }
-          );
-
-          timeoutId = setTimeout(() => {
-            console.log('1.2s wait window expired for Rewarded Ad. Proceeding with resolve...');
-            finish(false);
-          }, 1200);
-        });
-
-        const adLoadedInTime = await waitForAdPromise;
-
-        if (adLoadedInTime && rewardedInterstitialRef.current) {
-          try {
-            console.log('Showing Rewarded Ad after 2.5s wait window...');
-            const unsubClose = rewardedInterstitialRef.current.addAdEventListener(
-              AdEventType.CLOSED,
-              () => {
-                unsubClose();
-                setAdLoaded(false);
-                rewardedInterstitialRef.current?.load(); // preload next
-                doResolve(url);
-              }
-            );
-            rewardedInterstitialRef.current.show();
-            return; // wait for ad to close
-          } catch (err) {
-            console.log('Failed to show rewarded ad after wait:', err);
-          }
-        }
-      }
-    }
-    // Direct resolve if premium or ad failed to load within 2.5s
-    await doResolve(url);
-  }
-
-  async function doResolve(url) {
-    setParsing(true);
-    setResult(null);
-    setError('');
-    // Reset all download UI states for the new file
-    setDownloading(false);
-    setProgress(0);
-    setDownloadSpeed('0 KB/s');
-    setTimeRemaining('--');
-    setBytesWritten('0 MB');
-    setActiveDownloadId(null);
+  const handleResolve = async () => {
+    setErrorMsg('');
+    setResolvedMedia(null);
+    setDownloadSuccess(null);
     setIsPaused(false);
 
-    try {
-      const s = settings || await getSettings();
-      const data = await resolveTeraboxLink(s.apiBaseUrl, url, s.downloadQuality, isPremiumUser);
-      
-      const folderRawTitle = data.title ? data.title.split('/').filter(Boolean).pop() : '';
-      const folderTitle = folderRawTitle || (data.list && data.list.length > 1 ? `Folder (${data.list.length} Files)` : '');
-      const rawList = Array.isArray(data.list) && data.list.length > 0 ? data.list : [data];
-      const formattedFiles = rawList.map(item => ({
-        name: item.name || item.server_filename || 'video.mp4',
-        size: item.size || 'Unknown',
-        thumbnail: item.thumbnail || item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || item.thumbs?.icon || item.pic || item.image || data.thumbnail || data.thumbs?.url3 || '',
-        dlink: item.dlink || item.download_url || data.downloadUrl || '',
-        download_url: item.download_url || item.dlink || data.downloadUrl || '',
-        stream_url: item.stream_url || data.stream_url || '',
-        downloadHeaders: data.downloadHeaders || item.downloadHeaders || {},
-        shareUrl: url,
-        folderName: folderTitle,
-      })).filter(item => item.dlink || item.download_url);
+    const validation = validateInstagramUrl(inputUrl);
+    if (!validation.valid) {
+      setErrorMsg(validation.error || 'Please enter a valid Instagram link.');
+      return;
+    }
 
-      const isFolder = Boolean(
-        data.isFolder ||
-        data.isFolderRestricted ||
-        formattedFiles.length > 1 ||
-        (data.list && data.list.length > 1) ||
-        (data.rawList && data.rawList.length > 1) ||
-        (data.rawJson && (data.rawJson.isFolder || data.rawJson.isFolderRestricted || data.rawJson.code === 'VIP_REQUIRED_FOR_FOLDERS'))
+    setLoading(true);
+    try {
+      const settings = await getSettings();
+      const mediaInfo = await resolveInstagramMedia(settings.apiBaseUrl, validation.url);
+      setResolvedMedia(mediaInfo);
+    } catch (err) {
+      setErrorMsg(err.message || 'This Instagram media could not be downloaded.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startDownloadProcess = async (mediaInfo) => {
+    if (!mediaInfo) return;
+
+    setDownloading(true);
+    setIsPaused(false);
+    setDownloadStats({
+      percentage: 0,
+      written: '0 B',
+      total: mediaInfo.sizeFormatted || 'Unknown',
+      speed: '2.4 MB/s',
+      timeRemaining: 'Calculating...',
+    });
+
+    try {
+      const downloadedItem = await downloadInstagramMedia(
+        mediaInfo,
+        (progressData) => {
+          setDownloadStats({
+            percentage: progressData.percentage || 0,
+            written: progressData.written || '0 B',
+            total: progressData.total || mediaInfo.sizeFormatted || 'Unknown',
+            speed: progressData.speed || '2.4 MB/s',
+            timeRemaining: progressData.timeRemaining || '0s',
+          });
+        }
       );
 
-      console.log(`[Resolve] Resolved link. isFolder=${isFolder}, isPremiumUser=${isPremiumUser}, formattedCount=${formattedFiles.length}`);
-
-      if (isFolder && !isPremiumUser) {
-        setResult(null);
-        setError('');
-        Alert.alert(
-          '⭐ VIP Premium Required',
-          'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
-          [
-            { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
-            { text: 'Cancel', style: 'cancel' },
-          ]
-        );
-        return;
-      }
-
-      if (formattedFiles.length === 0) {
-        throw new Error('Could not find any downloadable files for this link.');
-      }
-
-      if (formattedFiles.length > 1) {
-        const folderResult = {
-          isFolder: true,
-          name: folderTitle || `Folder (${formattedFiles.length} Files)`,
-          size: `${formattedFiles.length} Files`,
-          thumbnail: formattedFiles[0]?.thumbnail || '',
-          files: formattedFiles,
-          shareUrl: url,
-        };
-        setResult(folderResult);
-      } else {
-        setResult(formattedFiles[0]);
-      }
-
-      // Save resolved link item to history & sync to MongoDB cloud
-      try {
-        const currentUser = user || await getStoredUser();
-        await addHistoryItem({
-          name: formattedFiles.length > 1 ? (folderTitle || `Folder (${formattedFiles.length} Files)`) : formattedFiles[0].name,
-          size: formattedFiles.length > 1 ? `${formattedFiles.length} Files` : formattedFiles[0].size,
-          thumbnail: formattedFiles[0]?.thumbnail || '',
-          url: url,
-          dlink: formattedFiles[0]?.dlink || '',
-          stream_url: formattedFiles[0]?.stream_url || '',
-          status: 'resolved',
-        }, currentUser?.email);
-      } catch (histErr) {
-        console.log('Failed to auto-save history:', histErr.message);
-      }
-    } catch (e) {
-      console.log('[Resolve Error]:', e.code, e.message);
-      setResult(null);
-      const isVipFolderError = 
-        e.code === 'VIP_REQUIRED_FOR_FOLDERS' ||
-        (e.message && (
-          e.message.includes('VIP') ||
-          e.message.includes('exclusive to VIP') ||
-          e.message.includes('Folders contain multiple files') ||
-          e.message.includes('Folder')
-        ));
-
-      if (isVipFolderError && !isPremiumUser) {
-        setError('');
-        Alert.alert(
-          '⭐ VIP Premium Required',
-          'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
-          [
-            { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
-            { text: 'Cancel', style: 'cancel' },
-          ]
-        );
-      } else {
-        setError(e.message || 'Failed to resolve link. Please try again.');
+      setDownloadSuccess(downloadedItem);
+      Alert.alert('Download Complete!', 'Instagram media has been saved to your downloads.');
+    } catch (err) {
+      if (err.message && !err.message.includes('canceled')) {
+        Alert.alert('Download Failed', err.message || 'Could not save the media file.');
       }
     } finally {
-      setParsing(false);
-    }
-  }
-
-  const handleDownloadItem = async (fileItem) => {
-    const dlUrl = fileItem?.dlink || fileItem?.download_url || fileItem?.url;
-    if (!dlUrl) {
-      Alert.alert('Download Link Missing', 'Could not get download link for this file.');
-      return;
-    }
-    const folderName = fileItem.folderName || (result && result.isFolder ? result.name : '');
-
-    const proceed = async () => {
-      try {
-        console.log('[Folder Download] Starting for file:', fileItem.name, 'Folder:', folderName);
-        const shareUrl = fileItem.shareUrl || result?.shareUrl || input.trim();
-        const id = await startDownload(
-          fileItem.name,
-          dlUrl,
-          fileItem.size || 'Unknown',
-          fileItem.thumbnail || '',
-          fileItem.downloadHeaders || {},
-          folderName,
-          shareUrl
-        );
-        console.log('[Folder Download] Started task id:', id);
-        const s = settings || await getSettings();
-        if (s && s.apiBaseUrl) {
-          trackActivity(s.apiBaseUrl, 'download').catch(e => console.log('Track activity failed:', e.message));
-        }
-      } catch (err) {
-        console.error('[Folder Download] Failed:', err);
-        Alert.alert('Download Error', err.message || 'Failed to start download.');
-      }
-    };
-
-    showAdBeforeAction(proceed);
-  };
-
-  const handleOpenFileOrShare = async (fileItem) => {
-    try {
-      const safeName = (fileItem.name || '').replace(/[^\w\-. ]/g, '_');
-      const fileUri = FileSystem.documentDirectory + safeName;
-      const info = await FileSystem.getInfoAsync(fileUri);
-      if (info.exists && info.size > 0) {
-        const isVideo = fileItem.stream_url || (fileItem.name && /\.(mp4|mkv|avi|mov|webm|flv|3gp)$/i.test(fileItem.name));
-        if (isVideo) {
-          setPlayerSource({ url: fileUri, headers: {} });
-          setPlayerName(fileItem.name || 'Video');
-          setPlayerVisible(true);
-        } else {
-          if (await Sharing.isAvailableAsync()) {
-            await Sharing.shareAsync(fileUri);
-          } else {
-            Alert.alert('File Downloaded', `Saved to ${fileUri}`);
-          }
-        }
-      } else {
-        handleDownloadItem(fileItem);
-      }
-    } catch (err) {
-      console.error('Error opening file:', err);
-    }
-  };
-
-  const handleWatchItem = (fileItem) => {
-    const proceed = () => {
-      const playUrl = fileItem.stream_url || fileItem.dlink || fileItem.download_url;
-      if (!playUrl) {
-        Alert.alert('Error', 'No playable stream URL found for this file.');
-        return;
-      }
-      const isProxyOrCdnUrl = playUrl.includes('download.php') || playUrl.includes('freeterabox.com') || playUrl.includes('1024terabox.com/file/') || playUrl.includes('bkt=');
-      const headers = isProxyOrCdnUrl ? {} : (fileItem.downloadHeaders || {});
-      let secondaryFallbackUrl = '';
-      if (playUrl !== fileItem.dlink && fileItem.dlink && fileItem.dlink.startsWith('http')) {
-        secondaryFallbackUrl = fileItem.dlink;
-      }
-
-      setPlayerSource({ url: playUrl, fallbackUrl: secondaryFallbackUrl, headers });
-      setPlayerName(fileItem.name || 'Video');
-      setPlayerVisible(true);
-    };
-
-    showAdBeforeAction(proceed);
-  };
-
-  const handleDownloadAllFolderFiles = (files) => {
-    if (!Array.isArray(files) || files.length === 0) return;
-    const folderName = (result && result.isFolder ? result.name : '') || 'Folder';
-    const proceed = async () => {
-      try {
-        let count = 0;
-        for (const f of files) {
-          const dlUrl = f.dlink || f.download_url || f.url;
-          if (dlUrl) {
-            const shareUrl = f.shareUrl || result?.shareUrl || input.trim();
-            await startDownload(
-              f.name,
-              dlUrl,
-              f.size || 'Unknown',
-              f.thumbnail || '',
-              f.downloadHeaders || {},
-              f.folderName || folderName,
-              shareUrl
-            );
-            count++;
-          }
-        }
-        Alert.alert('📥 Downloads Queued', `${count} files added to your Downloads queue.`);
-      } catch (err) {
-        console.error('[Batch Download] Failed:', err);
-        Alert.alert('Download Error', err.message || 'Failed to queue downloads.');
-      }
-    };
-
-    showAdBeforeAction(proceed);
-  };
-
-
-  async function handleDownload() {
-    console.log("[Download] Clicked! Current Result:", JSON.stringify(result));
-    if (!result || !result.dlink) return;
-
-    // Already downloading — show alert
-    if (downloading) {
-      Alert.alert(
-        '⏳ Download In Progress',
-        'A file is already being downloaded. Please wait for it to finish.',
-        [{ text: 'OK', style: 'default' }]
-      );
-      return;
-    }
-
-    try {
-      const history = await getHistory();
-      const existing = history.find(item => item.name === result.name);
-      if (existing) {
-        if (existing.status === 'downloading') {
-          Alert.alert(
-            '⏳ Already Downloading',
-            'This file is already being downloaded.',
-            [{ text: 'OK', style: 'default' }]
-          );
-          return;
-        } else if (existing.status === 'downloaded') {
-          Alert.alert(
-            '✅ Already Downloaded',
-            'This file has already been downloaded. Do you want to download it again?',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Download Again', onPress: () => triggerDownloadWithAd() }
-            ]
-          );
-          return;
-        }
-      }
-    } catch (e) {
-      console.log("Error checking history:", e);
-    }
-
-
-
-    await triggerDownloadWithAd();
-
-    async function triggerDownloadWithAd() {
-      showAdBeforeAction(proceedWithDownload);
-    }
-
-    async function proceedWithDownload() {
-      setDownloading(true);
+      setDownloading(false);
       setIsPaused(false);
-      setProgress(0);
-      setDownloadSpeed('0 KB/s');
-      setTimeRemaining('--');
-      setBytesWritten('0 MB');
-      setTotalBytes(result.size || 'Unknown');
-
-      try {
-        const folderName = result?.folderName || (result?.isFolder ? result.name : '');
-        const shareUrl = result?.shareUrl || input.trim();
-        const id = await startDownload(
-          result.name,
-          result.dlink,
-          result.size,
-          result.thumbnail || '',
-          result.downloadHeaders || {},
-          folderName,
-          shareUrl
-        );
-        setActiveDownloadId(id);
-
-        // Track download in database
-        const isVideo = /\.(mp4|mkv|avi|mov|webm|flv|mp3|wav)$/i.test(result.name || '');
-        const trackType = isVideo ? 'stream' : 'download';
-        const s = settings || await getSettings();
-        if (s && s.apiBaseUrl) {
-          trackActivity(s.apiBaseUrl, trackType).catch(e => console.log('Track activity failed:', e.message));
-        }
-      } catch (e) {
-        setError('Download failed: ' + e.message);
-        setDownloading(false);
-      }
     }
-  }
-
-  async function handleWatch() {
-    if (!result) return;
-
-    async function openPlayer() {
-      const s = settings || await getSettings();
-      if (s && s.apiBaseUrl) {
-        trackActivity(s.apiBaseUrl, 'stream').catch(() => {});
-      }
-
-      console.log('=== [WATCH PRESSED] ===');
-      console.log('[Watch Debug] result.stream_url:', result.stream_url ? result.stream_url.substring(0, 80) + '...' : 'EMPTY');
-      console.log('[Watch Debug] result.downloadUrl:', result.downloadUrl ? result.downloadUrl.substring(0, 80) + '...' : 'EMPTY');
-      console.log('[Watch Debug] result.dlink:', result.dlink ? result.dlink.substring(0, 80) + '...' : 'EMPTY');
-
-      const rawStreamUrl = result.stream_url || '';
-      let playUrl = '';
-
-      // Priority 1: Valid M3U8/HLS stream_url from API
-      if (rawStreamUrl.startsWith('http')) {
-        playUrl = rawStreamUrl;
-        console.log('[Watch] Using stream_url directly');
-      }
-      // Priority 2: Base64 encoded M3U8 data
-      else if (rawStreamUrl.startsWith('data:')) {
-        try {
-          const base64Data = rawStreamUrl.includes(',') ? rawStreamUrl.split(',')[1] : rawStreamUrl;
-          const localM3u8Uri = FileSystem.cacheDirectory + 'playlist.m3u8';
-          await FileSystem.writeAsStringAsync(localM3u8Uri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
-          console.log('[Watch Success] Successfully created local HLS playlist:', localM3u8Uri);
-          playUrl = localM3u8Uri;
-        } catch (err) {
-          console.error('[Watch Error] Failed to write local M3U8 file:', err.message);
-        }
-      }
-      // Priority 3: Direct dlink from API
-      else if (result.dlink && result.dlink.startsWith('http')) {
-        playUrl = result.dlink;
-        console.log('[Watch] Using dlink directly from API');
-      }
-      // Priority 4: downloadUrl fallback
-      else if (result.downloadUrl && result.downloadUrl.startsWith('http')) {
-        playUrl = result.downloadUrl;
-        console.log('[Watch] Fallback: Using downloadUrl directly from API');
-      }
-
-      if (!playUrl) {
-        console.error('[Watch Error] No playable URL found in result object!');
-        Alert.alert('Error', 'No playable URL found for this video.');
-        return;
-      }
-
-      console.log('[Watch Success] Selected playUrl:', playUrl);
-
-      // Do NOT pass downloadHeaders when playing through proxy (download.php) or direct TeraBox CDN (d8.freeterabox.com).
-      const isProxyOrCdnUrl = playUrl.includes('download.php') || playUrl.includes('freeterabox.com') || playUrl.includes('1024terabox.com/file/') || playUrl.includes('bkt=');
-      const headers = isProxyOrCdnUrl ? {} : (result.downloadHeaders || {});
-      let secondaryFallbackUrl = '';
-      if (playUrl !== result.dlink && result.dlink && result.dlink.startsWith('http')) {
-        secondaryFallbackUrl = result.dlink;
-      } else if (playUrl !== result.downloadUrl && result.downloadUrl && result.downloadUrl.startsWith('http')) {
-        secondaryFallbackUrl = result.downloadUrl;
-      }
-
-      setPlayerSource({ url: playUrl, fallbackUrl: secondaryFallbackUrl, headers });
-      setPlayerName(result.name || 'Video');
-      setPlayerVisible(true);
-    }
-
-    showAdBeforeAction(openPlayer);
-  }
-
-  const handleOpenTelegram = async () => {
-    const openTg = async () => {
-      try {
-        const rawUrl = result?.shareUrl || input.trim();
-        let shortcode = '';
-        const match = rawUrl.match(/\/s\/([\w-]+)/) || rawUrl.match(/surl=([\w-]+)/);
-        if (match && match[1]) {
-          shortcode = match[1];
-        } else {
-          shortcode = encodeURIComponent(rawUrl);
-        }
-
-        const botUsername = 'teraboxdownloader2027_bot';
-        const tgUrl = `https://t.me/${botUsername}?start=app_${shortcode}`;
-
-        await Linking.openURL(tgUrl).catch((e) => {
-          console.error('Failed to open Telegram URL:', e);
-        });
-      } catch (err) {
-        console.error('Error in handleOpenTelegram:', err);
-      }
-    };
-
-    showAdBeforeAction(openTg);
   };
 
-  async function handlePause() {
-    if (activeDownloadId) {
-      await pauseDownload(activeDownloadId);
+  const handleTogglePause = async () => {
+    if (!resolvedMedia || !resolvedMedia.id) return;
+    if (isPaused) {
+      await resumeDownload(resolvedMedia.id);
+      setIsPaused(false);
+    } else {
+      await pauseDownload(resolvedMedia.id);
       setIsPaused(true);
     }
-  }
+  };
 
-  async function handleResume() {
-    if (activeDownloadId) {
-      setIsPaused(false);
-      await resumeDownload(activeDownloadId);
+  const handleCancelDownload = async () => {
+    if (resolvedMedia && resolvedMedia.id) {
+      await cancelDownload(resolvedMedia.id);
     }
-  }
+    setDownloading(false);
+    setIsPaused(false);
+  };
 
-  async function handleCancel() {
-    if (activeDownloadId) {
-      await cancelDownload(activeDownloadId);
+  const handleOpenDownloads = () => {
+    if (downloadSuccess && downloadSuccess.fileUri) {
+      setShowPlayerModal(true);
+    } else if (navigation) {
+      navigation.navigate('Downloads');
     }
-  }
+  };
 
-  const canResolve = input.trim().length > 0;
+  const handleShareDownloaded = async () => {
+    if (downloadSuccess && downloadSuccess.fileUri) {
+      try {
+        await shareFile(downloadSuccess.fileUri);
+      } catch (e) {
+        Alert.alert('Sharing Error', e.message);
+      }
+    }
+  };
 
   return (
-    <View style={styles.container}>
-      <StatusBar style="light" />
-      <LinearGradient
-        colors={['#E5F2FF', '#F1E5FF']}
-        style={StyleSheet.absoluteFillObject}
-      />
+    <View style={[styles.container, { backgroundColor: theme.background }]}>
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-      {/* Royal Blue Top Header Bar */}
-      <View style={[styles.topBar, { paddingTop: insets.top + 8, height: 62 + insets.top }]}>
-        <TouchableOpacity activeOpacity={0.7} style={styles.headerProfileBtn} onPress={() => navigation.navigate('Settings')}>
-          {user && user.avatar ? (
-            <Image source={{ uri: user.avatar }} style={styles.headerAvatarImg} />
-          ) : (
-            <View style={styles.headerAvatarCircle}>
-              <Ionicons name={user ? "person" : "person-circle"} size={22} color="#FFFFFF" />
-            </View>
-          )}
-          {user && (user.premiumStatus === 'premium' || (user.plan && user.plan !== 'free')) && (
-            <View style={styles.headerCrownBadge}>
-              <Ionicons name="star" size={8} color="#FFFFFF" />
-            </View>
-          )}
-        </TouchableOpacity>
-        <Text style={styles.topBarTitle}>Terabox Downloader</Text>
-        <View style={styles.headerRightActions}>
-          {!isPremiumUser && (
-            <TouchableOpacity
-              activeOpacity={0.8}
-              style={styles.headerVipBtn}
-              onPress={() => setShowSubscriptionModal(true)}
-            >
-              <Ionicons name="sparkles" size={13} color="#F59E0B" />
-              <Text style={styles.headerVipText}>VIP</Text>
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity activeOpacity={0.7} style={styles.headerIconBtn} onPress={() => setShowShareSheet(true)}>
-            <Ionicons name="share-social-outline" size={24} color="#FFFFFF" />
+      {/* TOP HEADER BAR WITH SAFE AREA TOP PADDING */}
+      <LinearGradient
+        colors={gradientColors.header}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={[
+          styles.topHeaderBar,
+          {
+            paddingTop: topPadding,
+            height: 60 + topPadding,
+          },
+        ]}
+      >
+        <View style={styles.topHeaderContent}>
+          <View style={styles.topHeaderLeftIcon}>
+            <Image
+              source={require('../../icon.png')}
+              style={styles.topHeaderLogo}
+              resizeMode="cover"
+            />
+          </View>
+
+          <View style={styles.topHeaderTitleContainer} pointerEvents="none">
+            <Text style={styles.topHeaderTitleCentered}>Insta Downloader</Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.topHeaderShareButton}
+            onPress={() => setShowShareModal(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="share-social" size={22} color="#FFFFFF" />
           </TouchableOpacity>
         </View>
-      </View>
+      </LinearGradient>
 
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Glassmorphic main downloader card */}
-          <View style={styles.mainCard}>
-            <View style={styles.inputContainer}>
-              <TextInput
-                style={styles.input}
-                placeholder="Paste your video or file link here..."
-                placeholderTextColor="#7C8BA1"
-                value={input}
-                onChangeText={(val) => {
-                  setInput(val);
-                  if (error) setError('');
-                }}
-                multiline
-                numberOfLines={2}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-            </View>
-
-            {/* Instructions tip */}
-            <View style={styles.tipRow}>
-              <Ionicons name="bulb-outline" size={16} color="#6366F1" />
-              <Text style={styles.tipText}>
-                Paste any link above and tap Get Files to download instantly.
-              </Text>
-            </View>
-
-            {/* Action buttons */}
-            <View style={styles.actionsRow}>
-              <TouchableOpacity
-                style={styles.pasteButton}
-                onPress={pasteFromClipboard}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="clipboard-outline" size={18} color="#FFFFFF" />
-                <Text style={styles.pasteButtonText}>Paste</Text>
+        {/* MAIN CARD MATCHING IMAGE 2 */}
+        <View style={[styles.mainCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+          {/* INPUT FIELD */}
+          <View style={[styles.inputBox, { backgroundColor: theme.inputBg, borderColor: theme.border }]}>
+            <TextInput
+              style={[styles.input, { color: theme.text }]}
+              placeholder="https://www.instagram.com/reel/1xxxxxxx"
+              placeholderTextColor={theme.textMuted}
+              value={inputUrl}
+              onChangeText={(text) => {
+                setInputUrl(text);
+                if (errorMsg) setErrorMsg('');
+              }}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {inputUrl.length > 0 ? (
+              <TouchableOpacity onPress={handleClear} style={styles.clearIconButton}>
+                <Ionicons name="close-circle" size={20} color={theme.textMuted} />
               </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.getFilesButtonWrap, !canResolve && styles.disabledBtn]}
-                onPress={handleResolve}
-                disabled={!canResolve || parsing}
-                activeOpacity={0.8}
-              >
-                <LinearGradient
-                  colors={canResolve ? ['#6366F1', '#4F46E5'] : ['#A5B4FC', '#818CF8']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.getFilesGradient}
-                >
-                  {parsing ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Text style={styles.getFilesText}>Get Files</Text>
-                  )}
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
+            ) : null}
           </View>
 
-          {/* Banner Ad 2 - Placed above Supported TeraBox Formats (Staggered by 2.5s to prevent AdMob collision) */}
-          {!isPremiumUser && showTopBanner && !topBannerAdError && (
-            <View style={[styles.bannerAdContainer, { marginVertical: 8, borderRadius: 8 }]}>
-              <BannerAd
-                unitId={AD_UNIT_IDS.BANNER_2}
-                size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-                onAdLoaded={() => {
-                  setTopBannerAdLoaded(true);
-                  setTopBannerAdError(false);
-                }}
-                onAdFailedToLoad={(error) => {
-                  console.log('Top Banner Ad failed to load:', error.message);
-                  setTopBannerAdError(true);
-                }}
-              />
-            </View>
-          )}
+          {/* HINT SUBTITLE PILL */}
+          <View style={styles.hintPill}>
+            <Ionicons name="bulb-outline" size={15} color="#833AB4" style={{ marginRight: 6 }} />
+            <Text style={styles.hintText}>
+              Paste any link above and tap Get Files to download instantly.
+            </Text>
+          </View>
 
-          {/* Supported Domains collapsible section */}
-          <View style={styles.mirrorsCard}>
-            <TouchableOpacity 
-              style={styles.mirrorsHeader} 
-              onPress={() => setShowMirrors(!showMirrors)}
-              activeOpacity={0.7}
+          {/* ACTION BUTTONS ROW: [PASTE] [GET FILES] */}
+          <View style={styles.actionButtonsRow}>
+            {/* PASTE BUTTON */}
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={handlePaste}
+              style={styles.pasteButton}
             >
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Ionicons name="checkmark-circle-outline" size={18} color="#10B981" style={{ marginRight: 6 }} />
-                <Text style={styles.mirrorsTitle}>Supported TeraBox Formats</Text>
-              </View>
-              <Ionicons 
-                name={showMirrors ? "chevron-up" : "chevron-down"} 
-                size={18} 
-                color="#64748B" 
-              />
+              <Ionicons name="clipboard-outline" size={18} color="#C13584" style={{ marginRight: 6 }} />
+              <Text style={styles.pasteButtonText}>Paste</Text>
             </TouchableOpacity>
 
-            {showMirrors && (
-              <View style={styles.mirrorsGrid}>
-                {[
-                  'terabox.com',
-                  '1024tera.com',
-                  'teraboxapp.com',
-                  'mirrobox.com',
-                  'nephobox.com',
-                  '4funbox.co',
-                  'freeterabox.com',
-                  'tibibox.com',
-                  'momerybox.com'
-                ].map((domain) => (
-                  <View key={domain} style={styles.mirrorItem}>
-                    <Ionicons name="checkmark" size={14} color="#10B981" />
-                    <Text style={styles.mirrorText} numberOfLines={1}>{domain}</Text>
-                  </View>
-                ))}
-                <Text style={styles.mirrorsSubtext}>
-                  ✓ Works with all official domains and regional mirror sites.
-                </Text>
-              </View>
-            )}
+            {/* GET FILES BUTTON */}
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={handleResolve}
+              disabled={loading}
+              style={styles.downloadButtonTouch}
+            >
+              <LinearGradient
+                colors={gradientColors.button}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.downloadButtonGradient}
+              >
+                {loading ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="cloud-download-outline" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.downloadButtonText}>Get Files</Text>
+                  </>
+                )}
+              </LinearGradient>
+            </TouchableOpacity>
           </View>
 
-          {/* Error Message */}
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          {/* ERROR MESSAGE IF ANY */}
+          {errorMsg ? (
+            <View style={styles.errorContainer}>
+              <Ionicons name="alert-circle" size={16} color={theme.danger} />
+              <Text style={[styles.errorText, { color: theme.danger }]}>{errorMsg}</Text>
+            </View>
+          ) : null}
+        </View>
 
-          {/* Premium Resolved Result Card / Downloader Card matching mockup */}
-          {result && !parsing ? (
-            result.isFolder && Array.isArray(result.files) ? (
-              <View style={styles.resultCard}>
-                <View style={styles.folderHeaderRow}>
-                  <View style={styles.folderIconBadge}>
-                    <Ionicons name="folder-open" size={24} color="#3B82F6" />
-                  </View>
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Text style={styles.resultName} numberOfLines={1}>
-                      {result.name}
-                    </Text>
-                    <Text style={styles.resultSize}>
-                      {result.files.length} items ready to download
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.downloadAllBtn}
-                    onPress={() => handleDownloadAllFolderFiles(result.files)}
-                    activeOpacity={0.8}
+        {/* SUPPORTED FORMATS CARD */}
+        <View style={[styles.supportedCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+          <TouchableOpacity
+            style={styles.supportedHeaderRow}
+            onPress={() => setShowSupportedFormats(!showSupportedFormats)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.supportedHeaderTitleGroup}>
+              <Ionicons name="checkmark-circle-outline" size={20} color={theme.success} style={{ marginRight: 8 }} />
+              <Text style={[styles.supportedTitle, { color: theme.text }]}>
+                Supported Instagram Formats
+              </Text>
+            </View>
+            <Ionicons
+              name={showSupportedFormats ? 'chevron-up' : 'chevron-down'}
+              size={18}
+              color={theme.textMuted}
+            />
+          </TouchableOpacity>
+
+          {showSupportedFormats ? (
+            <View style={styles.supportedItemsList}>
+              <View style={styles.featureItem}>
+                <Ionicons name="checkmark" size={18} color={theme.success} style={styles.checkIcon} />
+                <Text style={[styles.featureText, { color: theme.textSecondary }]}>Instagram Reels</Text>
+              </View>
+
+              <View style={styles.featureItem}>
+                <Ionicons name="checkmark" size={18} color={theme.success} style={styles.checkIcon} />
+                <Text style={[styles.featureText, { color: theme.textSecondary }]}>Instagram Videos</Text>
+              </View>
+
+              <View style={styles.featureItem}>
+                <Ionicons name="checkmark" size={18} color={theme.success} style={styles.checkIcon} />
+                <Text style={[styles.featureText, { color: theme.textSecondary }]}>Instagram Photos</Text>
+              </View>
+
+              <View style={styles.featureItem}>
+                <Ionicons name="checkmark" size={18} color={theme.success} style={styles.checkIcon} />
+                <Text style={[styles.featureText, { color: theme.textSecondary }]}>Instagram Stories & Carousel</Text>
+              </View>
+            </View>
+          ) : null}
+        </View>
+
+        {/* LOADING STATE CARD */}
+        {loading ? (
+          <View style={[styles.mainCard, styles.loadingCard, { backgroundColor: theme.surface }]}>
+            <ActivityIndicator size="large" color="#E1306C" />
+            <Text style={[styles.loadingText, { color: theme.textSecondary }]}>
+              Resolving Instagram media...
+            </Text>
+          </View>
+        ) : null}
+
+        {/* DOWNLOAD RESULT PREVIEW CARD (MATCHING IMAGE 2 EXACTLY) */}
+        {resolvedMedia && !loading ? (
+          <View style={[styles.resultCard, { backgroundColor: '#FFFFFF', borderColor: '#E2E8F0' }]}>
+            {/* TOP ROW: THUMBNAIL ON LEFT, TITLE & BADGE ON RIGHT */}
+            <View style={styles.compactHeaderRow}>
+              {resolvedMedia.thumbnail ? (
+                <Image
+                  source={{ uri: resolvedMedia.thumbnail }}
+                  style={styles.compactThumbnail}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View style={[styles.compactThumbnailPlaceholder, { backgroundColor: '#F1F5F9' }]}>
+                  <Ionicons name="logo-instagram" size={24} color={theme.textMuted} />
+                </View>
+              )}
+
+              <View style={styles.compactMetaContainer}>
+                <Text style={styles.compactTitle} numberOfLines={1}>
+                  {resolvedMedia.title || `Instagram ${resolvedMedia.type}`}
+                </Text>
+
+                <View style={styles.compactStatusRow}>
+                  <View
+                    style={[
+                      styles.compactStatusBadge,
+                      {
+                        backgroundColor: downloading
+                          ? '#EEF2FF'
+                          : downloadSuccess
+                          ? '#ECFDF5'
+                          : '#FDF2F8',
+                      },
+                    ]}
                   >
-                    <Ionicons name="cloud-download" size={14} color="#FFFFFF" style={{ marginRight: 4 }} />
-                    <Text style={styles.downloadAllBtnText}>Download All</Text>
+                    <Ionicons
+                      name={
+                        downloading
+                          ? isPaused
+                            ? 'pause-circle-outline'
+                            : 'cloud-download-outline'
+                          : downloadSuccess
+                          ? 'checkmark-circle-outline'
+                          : 'cloud-outline'
+                      }
+                      size={13}
+                      color={downloading ? '#3B82F6' : downloadSuccess ? '#10B981' : '#E1306C'}
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text
+                      style={[
+                        styles.compactStatusText,
+                        {
+                          color: downloading ? '#3B82F6' : downloadSuccess ? '#10B981' : '#E1306C',
+                        },
+                      ]}
+                    >
+                      {downloading ? (isPaused ? 'Paused' : 'Downloading') : downloadSuccess ? 'Downloaded' : 'Ready'}
+                    </Text>
+                  </View>
+                  <Text style={styles.compactSizeText}>
+                    {downloadStats.total && downloadStats.total !== 'Unknown'
+                      ? downloadStats.total
+                      : resolvedMedia.sizeFormatted || 'Media'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {/* DOWNLOADING STATE METRICS & PROGRESS BAR (IMAGE 2 MATCH) */}
+            {downloading ? (
+              <View style={styles.downloadingSection}>
+                {/* METRICS PILLS (SPEED & REMAINING TIME) */}
+                <View style={styles.metricsPillsRow}>
+                  <View style={styles.metricPill}>
+                    <Ionicons name="speedometer-outline" size={13} color="#3B82F6" style={{ marginRight: 4 }} />
+                    <Text style={styles.metricPillText}>{downloadStats.speed}</Text>
+                  </View>
+                  <View style={styles.metricPill}>
+                    <Ionicons name="time-outline" size={13} color="#3B82F6" style={{ marginRight: 4 }} />
+                    <Text style={styles.metricPillText}>{downloadStats.timeRemaining}</Text>
+                  </View>
+                </View>
+
+                {/* WRITTEN/TOTAL & PERCENTAGE */}
+                <View style={styles.progressMetricsRow}>
+                  <Text style={styles.writtenTotalText}>
+                    {downloadStats.written} / {downloadStats.total}
+                  </Text>
+                  <Text style={styles.percentageText}>
+                    {downloadStats.percentage}%
+                  </Text>
+                </View>
+
+                {/* PROGRESS BAR TRACK & DOT INDICATOR */}
+                <View style={styles.progressBarTrack}>
+                  <View style={[styles.progressBarFill, { width: `${Math.max(4, downloadStats.percentage)}%` }]}>
+                    <View style={styles.progressBarDot} />
+                  </View>
+                </View>
+
+                {/* PAUSE & CANCEL ACTION BUTTONS */}
+                <View style={styles.downloadingButtonsRow}>
+                  <TouchableOpacity
+                    style={styles.pauseButton}
+                    onPress={handleTogglePause}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={isPaused ? 'play-outline' : 'pause-outline'}
+                      size={15}
+                      color="#3B82F6"
+                      style={{ marginRight: 4 }}
+                    />
+                    <Text style={styles.pauseButtonText}>{isPaused ? 'Resume' : 'Pause'}</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.cancelButton}
+                    onPress={handleCancelDownload}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="close-outline" size={16} color="#EF4444" style={{ marginRight: 4 }} />
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : downloadSuccess ? (
+              /* DOWNLOAD SUCCESS ACTIONS */
+              <View style={styles.successActionsContainer}>
+                <View style={styles.actionButtonsRow}>
+                  <TouchableOpacity
+                    style={[styles.secondaryButton, { backgroundColor: '#F1F5F9' }]}
+                    onPress={handleOpenDownloads}
+                  >
+                    <Ionicons name="folder-open-outline" size={16} color="#1E293B" />
+                    <Text style={[styles.secondaryButtonText, { color: '#1E293B' }]}>Open File</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.secondaryButton, { backgroundColor: '#FDF2F8' }]}
+                    onPress={handleShareDownloaded}
+                  >
+                    <Ionicons name="share-social-outline" size={16} color="#E1306C" />
+                    <Text style={[styles.secondaryButtonText, { color: '#E1306C' }]}>Share</Text>
                   </TouchableOpacity>
                 </View>
 
-                <View style={styles.folderDivider} />
-
-                <View style={styles.folderFilesContainer}>
-                  {result.files.map((file, idx) => {
-                    const isVideo = file.stream_url || (file.name && /\.(mp4|mkv|avi|mov|webm|flv|3gp)$/i.test(file.name));
-                    return (
-                      <View key={idx} style={styles.folderFileItem}>
-                        {file.thumbnail ? (
-                          <Image source={{ uri: file.thumbnail }} style={styles.folderThumbImg} />
-                        ) : (
-                          <View style={styles.folderThumbFallback}>
-                            <Ionicons name={isVideo ? "videocam-outline" : "document-text-outline"} size={20} color="#3B82F6" />
-                          </View>
-                        )}
-                        <View style={styles.folderFileInfo}>
-                          <Text style={styles.folderFileName} numberOfLines={1}>
-                            {file.name}
-                          </Text>
-                          <Text style={styles.folderFileSize}>{file.size}</Text>
-                        </View>
-
-                        <View style={styles.folderFileActions}>
-                          {isVideo ? (
-                            <TouchableOpacity
-                              style={styles.folderActionIconBtn}
-                              hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
-                              onPress={() => handleWatchItem(file)}
-                              activeOpacity={0.7}
-                            >
-                              <Ionicons name="play-circle" size={28} color="#6366F1" />
-                            </TouchableOpacity>
-                          ) : null}
-
-                          <FileDownloadButton
-                            file={file}
-                            onDownloadClick={handleDownloadItem}
-                            onOpenClick={handleOpenFileOrShare}
-                          />
-                        </View>
-                      </View>
-                    );
-                  })}
-                </View>
+                <TouchableOpacity
+                  style={[styles.outlineButton, { borderColor: '#E2E8F0' }]}
+                  onPress={() => startDownloadProcess(resolvedMedia)}
+                >
+                  <Text style={[styles.outlineButtonText, { color: '#64748B' }]}>Download Again</Text>
+                </TouchableOpacity>
               </View>
             ) : (
-              <View style={styles.resultCard}>
-                <View style={styles.resultHeader}>
-                  {result.thumbnail ? (
-                    <Image source={{ uri: result.thumbnail }} style={styles.thumbnailImage} />
-                  ) : (
-                    <View style={styles.resultIconWrap}>
-                      <Ionicons name="videocam" size={24} color="#3B82F6" />
-                    </View>
-                  )}
-                  <View style={styles.resultInfo}>
-                    <Text style={styles.resultName} numberOfLines={2}>
-                      {result.name}
-                    </Text>
-                    {downloading ? (
-                      <View style={styles.statusPillRow}>
-                        <View style={styles.statusPill}>
-                          <Ionicons name="cloud-download-outline" size={12} color="#1E3A8A" />
-                          <Text style={styles.statusPillText}>
-                            {isPaused ? 'Paused' : 'Downloading'}
-                          </Text>
-                        </View>
-                        <Text style={styles.totalSizeText}>{totalBytes}</Text>
-                      </View>
-                    ) : (
-                      <Text style={styles.resultSize}>{result.size}</Text>
-                    )}
-                  </View>
-                </View>
+              /* READY TO DOWNLOAD BUTTON */
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => startDownloadProcess(resolvedMedia)}
+                style={styles.saveMediaButtonTouch}
+              >
+                <LinearGradient
+                  colors={gradientColors.button}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.downloadButtonGradient}
+                >
+                  <Ionicons name="cloud-download-outline" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
+                  <Text style={styles.downloadButtonText}>Start Download</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            )}
+          </View>
+        ) : null}
+      </ScrollView>
 
-                {downloading ? (
-                  <View style={styles.progressContainer}>
-                    {/* Speed and Time remaining badges */}
-                    <View style={styles.statsBadgesRow}>
-                      <View style={styles.statBadge}>
-                        <Ionicons name="speedometer-outline" size={14} color="#2563EB" />
-                        <Text style={styles.statBadgeText}>{downloadSpeed}</Text>
-                      </View>
-                      <View style={styles.statBadge}>
-                        <Ionicons name="time-outline" size={14} color="#2563EB" />
-                        <Text style={styles.statBadgeText}>{timeRemaining}</Text>
-                      </View>
-                    </View>
-
-                    {/* Progress numeric indicators */}
-                    <View style={styles.progressTextRow}>
-                      <Text style={styles.progressBytesText}>
-                        {bytesWritten} / {totalBytes}
-                      </Text>
-                      <Text style={styles.progressPercentText}>
-                        {Math.round(progress * 100)}%
-                      </Text>
-                    </View>
-
-                    {/* Clean progress bar */}
-                    <View style={styles.progressTrack}>
-                      <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
-                    </View>
-
-                    {/* Action controls: Pause/Resume and Cancel */}
-                    <View style={styles.controlButtonsRow}>
-                      {isPaused ? (
-                        <TouchableOpacity
-                          style={[styles.controlBtn, styles.pauseBtn]}
-                          onPress={handleResume}
-                          activeOpacity={0.8}
-                        >
-                          <Ionicons name="play-outline" size={18} color="#2563EB" />
-                          <Text style={styles.controlBtnTextBlue}>Resume</Text>
-                        </TouchableOpacity>
-                      ) : (
-                        <TouchableOpacity
-                          style={[styles.controlBtn, styles.pauseBtn]}
-                          onPress={handlePause}
-                          activeOpacity={0.8}
-                        >
-                          <Ionicons name="pause-outline" size={18} color="#2563EB" />
-                          <Text style={styles.controlBtnTextBlue}>Pause</Text>
-                        </TouchableOpacity>
-                      )}
-
-                      <TouchableOpacity
-                        style={[styles.controlBtn, styles.cancelBtn]}
-                        onPress={handleCancel}
-                        activeOpacity={0.8}
-                      >
-                        <Ionicons name="close-outline" size={18} color="#EF4444" />
-                        <Text style={styles.controlBtnTextRed}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  <View style={styles.actionBtnsContainer}>
-                    <View style={styles.actionBtnsRow}>
-                      <TouchableOpacity
-                        style={styles.downloadBtn}
-                        onPress={handleDownload}
-                        activeOpacity={0.8}
-                      >
-                        <Ionicons name="download-outline" size={18} color="#FFFFFF" />
-                        <Text style={styles.downloadBtnText}>Download File</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.watchBtn}
-                        onPress={handleWatch}
-                        activeOpacity={0.8}
-                      >
-                        <Ionicons name="play-circle-outline" size={18} color="#FFFFFF" />
-                        <Text style={styles.watchBtnText}>Watch</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.telegramBtn}
-                      onPress={handleOpenTelegram}
-                      activeOpacity={0.8}
-                    >
-                      <Ionicons name="paper-plane-outline" size={18} color="#FFFFFF" />
-                      <Text style={styles.telegramBtnText}>Get in Telegram</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            )
-          ) : null}
-
-
-        </ScrollView>
-      </KeyboardAvoidingView>
-
-      <ShareSheet visible={showShareSheet} onClose={() => setShowShareSheet(false)} />
-
-      <PlayerScreen
-        visible={playerVisible}
-        url={playerSource?.url}
-        fallbackUrl={playerSource?.fallbackUrl}
-        headers={playerSource?.headers}
-        name={playerName}
-        onClose={() => setPlayerVisible(false)}
-        isPremium={isPremiumUser}
+      {/* SHARE SHEET MODAL */}
+      <ShareSheet
+        visible={showShareModal}
+        onClose={() => setShowShareModal(false)}
       />
 
-
-
-      <SubscriptionModal
-        visible={showSubscriptionModal}
-        onClose={() => setShowSubscriptionModal(false)}
-        user={user}
-        onPaymentSuccess={async (email) => {
-          const fresh = await fetchFreshUserStatus(email);
-          if (fresh) setUser(fresh);
-          setShowSubscriptionModal(false);
-          Alert.alert('🎉 Premium Activated!', 'Your plan is now active on both App & Website!');
-        }}
+      {/* FULLSCREEN VIDEO PLAYER MODAL */}
+      <VideoPlayerModal
+        visible={showPlayerModal}
+        item={downloadSuccess}
+        onClose={() => setShowPlayerModal(false)}
       />
-
-      {/* Dynamic Firebase Update Announcement Ticker */}
-      <UpdateBannerTicker
-        isFocused={isFocused}
-        onSelectLink={async (link) => {
-          if (!link) return;
-          try {
-            await Linking.openURL(link);
-          } catch (e) {
-            console.log('[Announcement] Open URL error:', e.message);
-          }
-        }}
-      />
-
-      {/* Banner Ad - Disabled for Premium Users */}
-      {!isPremiumUser && !bannerAdError && (
-        <View style={styles.bannerAdContainer}>
-          <BannerAd
-            unitId={AD_UNIT_IDS.BANNER_1}
-            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-            onAdLoaded={() => {
-              setBannerAdLoaded(true);
-              setBannerAdError(false);
-            }}
-            onAdFailedToLoad={(error) => {
-              console.log('Banner Ad failed to load:', error.message);
-              setBannerAdError(true);
-            }}
-          />
-        </View>
-      )}
     </View>
   );
 }
@@ -1312,712 +550,390 @@ export default function HomeScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
   },
-  flex: {
-    flex: 1,
-  },
-  topBar: {
-    backgroundColor: '#3B82F6',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
+  topHeaderBar: {
+    paddingHorizontal: spacing.lg,
+    elevation: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  headerRightActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  headerVipBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 12,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.15,
-    shadowRadius: 2,
+    shadowRadius: 4,
+    justifyContent: 'flex-end',
+    paddingBottom: 10,
   },
-  headerVipText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#D97706',
-    letterSpacing: 0.5,
-  },
-  headerIconBtn: {
-    padding: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerProfileBtn: {
-    padding: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  headerAvatarImg: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    borderWidth: 1.5,
-    borderColor: '#FFFFFF',
-  },
-  headerAvatarCircle: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: 'rgba(255, 255, 255, 0.25)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: '#FFFFFF',
-  },
-  headerCrownBadge: {
-    position: 'absolute',
-    bottom: -2,
-    right: -2,
-    backgroundColor: '#F59E0B',
-    borderRadius: 7,
-    width: 14,
-    height: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#FFFFFF',
-  },
-  customMenuIcon: {
-    width: 22,
-    height: 14,
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  menuBarLong: {
-    width: 22,
-    height: 2.5,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 1.25,
-  },
-  menuBarShort: {
-    width: 14,
-    height: 2.5,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 1.25,
-  },
-  topBarTitle: {
-    color: '#FFFFFF',
-    fontSize: 22,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-    fontFamily: Platform.OS === 'ios' ? 'System' : 'sans-serif-medium',
-  },
-  titleContainer: {
+  topHeaderContent: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    height: 44,
+    position: 'relative',
+    width: '100%',
+  },
+  topHeaderLeftIcon: {
+    width: 40,
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  topHeaderLogo: {
+    width: 38,
+    height: 38,
+    borderRadius: 9,
+  },
+  topHeaderTitleContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
     justifyContent: 'center',
   },
-  headerLogo: {
-    width: 28,
-    height: 28,
-    marginRight: 8,
-    borderRadius: 6,
+  topHeaderTitleCentered: {
+    color: '#FFFFFF',
+    fontSize: 21,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textAlign: 'center',
   },
-  content: {
-    padding: spacing.md,
-    paddingBottom: spacing.xl,
+  topHeaderShareButton: {
+    width: 40,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    padding: 4,
+    zIndex: 2,
+  },
+  scrollContent: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: 80,
   },
   mainCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.85)',
-    borderRadius: 20,
-    padding: spacing.md,
-    shadowColor: '#6366F1',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.08,
-    shadowRadius: 15,
-    elevation: 4,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.6)',
     marginBottom: spacing.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  inputContainer: {
+  inputBox: {
+    borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    height: 52,
+    justifyContent: 'center',
     marginBottom: spacing.sm,
   },
   input: {
     fontSize: 14,
-    color: '#1E293B',
-    minHeight: 48,
-    textAlignVertical: 'top',
+    width: '100%',
   },
-  chipsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginBottom: spacing.md,
+  clearIconButton: {
+    position: 'absolute',
+    right: 12,
   },
-  chip: {
+  hintPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(241, 245, 249, 0.9)',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: radius.pill,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    marginRight: 6,
-    marginBottom: 6,
-  },
-  chipText: {
-    fontSize: 11,
-    color: '#475569',
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  tipRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(238, 242, 255, 0.7)',
-    borderRadius: 8,
-    padding: 8,
+    backgroundColor: '#FDF2F8',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: radius.sm,
     marginBottom: spacing.md,
   },
-  tipText: {
+  hintText: {
     fontSize: 12,
-    color: '#4F46E5',
-    marginLeft: 6,
+    color: '#833AB4',
+    fontWeight: '500',
     flex: 1,
-    lineHeight: 16,
   },
-  actionsRow: {
+  actionButtonsRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
   pasteButton: {
+    width: '32%',
+    height: 48,
+    backgroundColor: '#FDF2F8',
+    borderColor: '#FBCFE8',
+    borderWidth: 1,
+    borderRadius: radius.md,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#3B82F6',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginRight: 10,
   },
   pasteButtonText: {
-    color: '#FFFFFF',
+    color: '#C13584',
+    fontSize: 15,
     fontWeight: '700',
-    fontSize: 14,
-    marginLeft: 4,
   },
-  getFilesButtonWrap: {
+  downloadButtonTouch: {
     flex: 1,
-    borderRadius: 12,
+    height: 48,
+    marginLeft: spacing.sm,
+    borderRadius: radius.md,
     overflow: 'hidden',
   },
-  getFilesGradient: {
+  downloadButtonGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: radius.md,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
   },
-  getFilesText: {
+  downloadButtonText: {
     color: '#FFFFFF',
+    fontSize: 15,
     fontWeight: '700',
-    fontSize: 14,
   },
-  disabledBtn: {
-    opacity: 0.6,
+  saveMediaButtonTouch: {
+    marginTop: spacing.md,
+    height: 50,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+  },
+  errorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: spacing.md,
+    backgroundColor: '#FEF2F2',
+    padding: spacing.sm,
+    borderRadius: radius.sm,
   },
   errorText: {
-    color: '#EF4444',
-    fontSize: 13,
-    textAlign: 'center',
-    marginTop: spacing.xs,
-    marginBottom: spacing.sm,
-    fontWeight: '500',
+    ...typography.bodySmall,
+    marginLeft: spacing.xs,
+    flex: 1,
+  },
+  loadingCard: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xl,
+  },
+  loadingText: {
+    ...typography.bodyMedium,
+    marginTop: spacing.md,
   },
   resultCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: spacing.md,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginTop: spacing.md,
-    marginBottom: spacing.md,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.04,
-    shadowRadius: 10,
-    elevation: 2,
+    marginBottom: spacing.lg,
   },
-  resultHeader: {
+  compactHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.md,
   },
-  thumbnailImage: {
-    width: 52,
-    height: 52,
-    borderRadius: 10,
-    marginRight: spacing.md,
-    backgroundColor: '#F1F5F9',
+  compactThumbnail: {
+    width: 80,
+    height: 80,
+    borderRadius: 14,
   },
-  resultIconWrap: {
-    width: 52,
-    height: 52,
-    borderRadius: 10,
-    backgroundColor: '#EEF2FF',
-    alignItems: 'center',
+  compactThumbnailPlaceholder: {
+    width: 80,
+    height: 80,
+    borderRadius: 14,
     justifyContent: 'center',
-    marginRight: spacing.md,
+    alignItems: 'center',
   },
-  resultInfo: {
+  compactMetaContainer: {
     flex: 1,
+    marginLeft: 14,
   },
-  resultName: {
-    color: '#1E293B',
-    fontSize: 14,
+  compactTitle: {
+    fontSize: 16,
     fontWeight: '700',
-    lineHeight: 18,
-  },
-  resultSize: {
-    color: '#64748B',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  statusPillRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#EFF6FF',
-    borderRadius: 6,
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    marginRight: 8,
-  },
-  statusPillText: {
-    color: '#2563EB',
-    fontSize: 10,
-    fontWeight: '700',
-    marginLeft: 4,
-  },
-  totalSizeText: {
-    color: '#64748B',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  downloadBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginRight: 8,
-  },
-  downloadBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-    marginLeft: 6,
-  },
-  watchBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#6366F1',
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginLeft: 8,
-  },
-  watchBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-    marginLeft: 6,
-  },
-  actionBtnsContainer: {
-    marginTop: 4,
-  },
-  actionBtnsRow: {
-    flexDirection: 'row',
-  },
-  telegramBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0088cc',
-    borderRadius: 12,
-    paddingVertical: 12,
-    marginTop: 10,
-  },
-  telegramBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
-    marginLeft: 6,
-  },
-  progressContainer: {
-    marginTop: spacing.xs,
-  },
-  statsBadgesRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  statBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F1F5F9',
-    borderRadius: 8,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    marginRight: 8,
-  },
-  statBadgeText: {
-    color: '#475569',
-    fontSize: 11,
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  progressTextRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     marginBottom: 6,
   },
-  progressBytesText: {
-    fontSize: 11,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  progressPercentText: {
-    fontSize: 11,
-    color: '#2563EB',
-    fontWeight: '700',
-  },
-  progressTrack: {
-    height: 6,
-    borderRadius: radius.pill,
-    backgroundColor: '#E2E8F0',
-    overflow: 'hidden',
-    marginBottom: 16,
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: radius.pill,
-    backgroundColor: '#2563EB',
-  },
-  controlButtonsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  controlBtn: {
-    flex: 1,
+  compactStatusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
   },
-  pauseBtn: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    marginRight: 8,
-  },
-  cancelBtn: {
-    backgroundColor: '#FFF5F5',
-    borderColor: '#FEE2E2',
-    marginLeft: 8,
-  },
-  controlBtnTextBlue: {
-    color: '#2563EB',
-    fontSize: 13,
-    fontWeight: '700',
-    marginLeft: 4,
-  },
-  controlBtnTextRed: {
-    color: '#EF4444',
-    fontSize: 13,
-    fontWeight: '700',
-    marginLeft: 4,
-  },
-  adCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginBottom: spacing.md,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  adBadgeRow: {
+  compactStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.sm,
-  },
-  adBadge: {
-    backgroundColor: '#F59E0B',
-    borderRadius: 4,
-    paddingHorizontal: 4,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 2,
-    marginRight: 6,
-  },
-  adBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  adLabel: {
-    color: '#4B5563',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  adContent: {
-    alignItems: 'center',
-  },
-  adMainRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: spacing.md,
-  },
-  adLogo: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderRadius: radius.sm,
     marginRight: spacing.sm,
   },
-  adInfo: {
-    flex: 1,
-  },
-  adTitle: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  adSubtitleText: {
-    color: '#4B5563',
+  compactStatusText: {
     fontSize: 11,
-    marginTop: 2,
-  },
-  adImagePlaceholder: {
-    width: '100%',
-    height: 120,
-    borderRadius: 8,
-    backgroundColor: '#F9FAFB',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.md,
-  },
-  adPlaceholderText: {
-    color: '#6B7280',
-    fontSize: 11,
-    marginTop: 4,
     fontWeight: '600',
   },
-  adInstallBtn: {
-    width: '100%',
-    backgroundColor: '#3B82F6',
-    borderRadius: 10,
-    paddingVertical: 10,
-    alignItems: 'center',
+  compactSizeText: {
+    fontSize: 12,
   },
-  adInstallText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  bannerAdContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFFFF',
+  downloadingSection: {
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: '#E2E8F0',
+    borderTopColor: '#F1F5F9',
+  },
+  metricsPillsRow: {
+    flexDirection: 'row',
+    marginBottom: spacing.sm,
+  },
+  metricPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: spacing.sm + 2,
     paddingVertical: 4,
+    borderRadius: radius.sm,
+    marginRight: spacing.sm,
   },
-  mirrorsCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginTop: spacing.md,
-    marginBottom: spacing.md,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 2,
+  metricPillText: {
+    fontSize: 12,
+    color: '#475569',
+    fontWeight: '600',
   },
-  mirrorsHeader: {
+  progressMetricsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  mirrorsTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#0F172A',
-  },
-  mirrorsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginTop: spacing.md,
-  },
-  mirrorItem: {
-    width: '48%',
-    flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    marginBottom: 8,
+    marginBottom: 6,
   },
-  mirrorText: {
-    fontSize: 11,
-    color: '#334155',
-    marginLeft: 6,
+  writtenTotalText: {
+    fontSize: 13,
+    color: '#64748B',
     fontWeight: '500',
   },
-  mirrorsSubtext: {
-    fontSize: 11,
-    color: '#10B981',
-    fontWeight: '600',
-    marginTop: 6,
-    width: '100%',
-    textAlign: 'center',
-  },
-  folderHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  folderIconBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: '#EFF6FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#DBEAFE',
-  },
-  downloadAllBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#3B82F6',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  downloadAllBtnText: {
-    color: '#FFFFFF',
-    fontSize: 12,
+  percentageText: {
+    fontSize: 13,
+    color: '#3B82F6',
     fontWeight: '700',
   },
-  folderDivider: {
-    height: 1,
-    backgroundColor: '#E2E8F0',
-    marginVertical: 10,
+  progressBarTrack: {
+    height: 6,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 3,
+    marginBottom: spacing.md,
+    justifyContent: 'center',
   },
-  folderFilesContainer: {
-    marginTop: 4,
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#3B82F6',
+    borderRadius: 3,
+    position: 'relative',
+    justifyContent: 'center',
   },
-  folderFileItem: {
+  progressBarDot: {
+    position: 'absolute',
+    right: -4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#3B82F6',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  downloadingButtonsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 8,
+    justifyContent: 'space-between',
+  },
+  pauseButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-  },
-  folderThumbImg: {
-    width: 40,
-    height: 40,
-    borderRadius: 6,
-    backgroundColor: '#E2E8F0',
-  },
-  folderThumbFallback: {
-    width: 40,
-    height: 40,
-    borderRadius: 6,
-    backgroundColor: '#EFF6FF',
+    backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  folderFileInfo: {
-    flex: 1,
-    marginLeft: 10,
     marginRight: 6,
   },
-  folderFileName: {
-    fontSize: 13,
+  pauseButtonText: {
+    color: '#3B82F6',
+    fontSize: 14,
     fontWeight: '600',
-    color: '#0F172A',
   },
-  folderFileSize: {
-    fontSize: 11,
-    color: '#64748B',
-    marginTop: 2,
+  cancelButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: radius.md,
+    backgroundColor: '#FEF2F2',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 6,
   },
-  folderFileActions: {
+  cancelButtonText: {
+    color: '#EF4444',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  successActionsContainer: {
+    marginTop: spacing.md,
+    paddingTop: spacing.sm,
+  },
+  secondaryButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 4,
+  },
+  secondaryButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: spacing.xs,
+  },
+  outlineButton: {
+    height: 44,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: spacing.sm,
+  },
+  outlineButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  supportedCard: {
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    marginTop: spacing.xs,
+    marginBottom: spacing.md,
+  },
+  supportedHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.xs,
+  },
+  supportedHeaderTitleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  folderActionIconBtn: {
-    padding: 4,
-    marginLeft: 6,
+  supportedTitle: {
+    fontSize: 15,
+    fontWeight: '600',
   },
-  circularProgressWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1.5,
-    borderColor: '#10B981',
+  supportedItemsList: {
+    marginTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingTop: spacing.sm,
+  },
+  featureItem: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 6,
+    marginBottom: spacing.xs,
+    paddingVertical: 4,
   },
-  circularProgressText: {
-    fontSize: 9,
-    fontWeight: '700',
-    color: '#059669',
-    marginTop: -2,
+  checkIcon: {
+    marginRight: spacing.md,
+  },
+  featureText: {
+    fontSize: 14,
+    fontWeight: '500',
   },
 });

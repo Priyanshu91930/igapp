@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const NOTIFICATIONS_STORAGE_KEY = '@teraapp/push_notifications_history';
-const UNREAD_COUNT_KEY = '@teraapp/unread_notifications_count';
+const NOTIFICATIONS_STORAGE_KEY = '@instadownloader/push_notifications_history';
+const UNREAD_COUNT_KEY = '@instadownloader/unread_notifications_count';
 
 let notificationListeners = [];
 
@@ -20,23 +20,10 @@ function notifyNotificationListeners() {
   });
 }
 
-function isDownloadRelatedNotification(title = '', body = '') {
-  const t = String(title).toLowerCase();
-  const b = String(body).toLowerCase();
-  if (t.includes('downloading') || t.includes('download complete') || t.includes('download failed')) {
-    return true;
-  }
-  if (b.includes('.mp4') || b.includes('.mkv') || b.includes('mb/s') || b.includes('%') || b.includes('left')) {
-    return true;
-  }
-  return false;
-}
-
 export async function getInAppNotifications() {
   try {
     const raw = await AsyncStorage.getItem(NOTIFICATIONS_STORAGE_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return list.filter((item) => !isDownloadRelatedNotification(item.title, item.body));
+    return raw ? JSON.parse(raw) : [];
   } catch (e) {
     return [];
   }
@@ -44,39 +31,25 @@ export async function getInAppNotifications() {
 
 export async function saveInAppNotification({ title, body, data = {}, time = null }) {
   try {
-    if (isDownloadRelatedNotification(title, body)) {
-      console.log('[NotificationStorage] Skipping local download notification:', title);
-      return await getInAppNotifications();
-    }
-
     const current = await getInAppNotifications();
     const newItem = {
       id: String(Date.now() + Math.random()),
-      title: title || 'Notification',
+      title: title || 'Insta Downloader',
       body: body || '',
       data: data || {},
       time: time || new Date().toISOString(),
       read: false,
     };
 
-    // Filter duplicate identical notifications within 5 seconds
-    const isDuplicate = current.some(
-      (n) => n.title === newItem.title && n.body === newItem.body && Math.abs(new Date(n.time) - new Date(newItem.time)) < 5000
-    );
-
-    if (isDuplicate) return current;
-
     const updated = [newItem, ...current].slice(0, 50);
     await AsyncStorage.setItem(NOTIFICATIONS_STORAGE_KEY, JSON.stringify(updated));
 
-    // Increment unread count
     const unread = await getUnreadNotificationCount();
     await AsyncStorage.setItem(UNREAD_COUNT_KEY, String(unread + 1));
 
     notifyNotificationListeners();
     return updated;
   } catch (e) {
-    console.log('[NotificationStorage] Save error:', e.message);
     return [];
   }
 }

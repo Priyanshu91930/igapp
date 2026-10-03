@@ -1,39 +1,39 @@
 {
   "expo": {
-    "name": "Tera Downloader",
-    "slug": "teradownloader",
-    "version": "2.5.0",
+    "name": "Insta Downloader",
+    "slug": "instadownloader",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
+    "scheme": "instadownloader",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.instaadownloader.app"
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/android-icon-foreground.png"
       },
-      "package": "com.anihub.teradownloader",
-      "googleServicesFile": "./google-services.json",
-      "versionCode": 25,
+      "package": "com.instaadownloader.app",
+      "versionCode": 1,
       "permissions": [
-        "com.android.vending.BILLING"
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
       ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-iap",
-      "@react-native-google-signin/google-signin",
       "./plugins/withKotlinVersion",
       "expo-sharing",
       [
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#3B82F6"
+          "color": "#E1306C"
         }
       ],
       [
@@ -47,7 +47,7 @@
       [
         "react-native-google-mobile-ads",
         {
-          "androidAppId": "ca-app-pub-9717309889631554~3337182148",
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
           "iosAppId": "ca-app-pub-3940256099942544~1458002511"
         }
       ],

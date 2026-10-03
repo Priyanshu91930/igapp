@@ -12,16 +12,15 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const SHARE_MSG = `🔥 Terabox Downloader App
+const SHARE_MSG = `🔥 Insta Downloader App
 
-✅ Download TeraBox files directly - no login needed
-✅ Watch videos online for FREE - instant streaming
-✅ Fast CDN download links - no ads, no waiting
-✅ Supports all TeraBox mirrors & folders
+✅ Download Instagram Reels, Videos & Photos easily
+✅ Fast & high quality downloads
+✅ Free & simple to use
 
-📲 Download now (Free):
-https://play.google.com/store/apps/details?id=com.anihub.teradownloader`;
-const PLAY_URL = 'https://play.google.com/store/apps/details?id=com.anihub.teradownloader';
+📲 Download now:
+https://play.google.com/store/apps/details?id=com.instaadownloader.app`;
+const PLAY_URL = 'https://play.google.com/store/apps/details?id=com.instaadownloader.app';
 
 const shareOptions = [
   { id: 'whatsapp', label: 'WhatsApp', icon: 'logo-whatsapp', color: '#25D366', bg: '#E8FAF0' },
@@ -29,7 +28,7 @@ const shareOptions = [
   { id: 'instagram', label: 'Instagram', icon: 'logo-instagram', color: '#E1306C', bg: '#FDE8F0' },
   { id: 'facebook', label: 'Facebook', icon: 'logo-facebook', color: '#1877F2', bg: '#E8F0FE' },
   { id: 'twitter', label: 'X / Twitter', icon: 'logo-twitter', color: '#000000', bg: '#F0F0F0' },
-  { id: 'copy', label: 'Copy Link', icon: 'copy', color: '#6366F1', bg: '#EEF2FF' },
+  { id: 'copy', label: 'Copy Link', icon: 'copy', color: '#E1306C', bg: '#FDE8F0' },
   { id: 'more', label: 'More', icon: 'ellipsis-horizontal', color: '#64748B', bg: '#F1F5F9' },
 ];
 
@@ -41,7 +40,7 @@ export default function ShareSheet({ visible, onClose }) {
     setTimeout(() => {
       switch (option.id) {
         case 'copy':
-          Clipboard.setString(PLAY_URL);
+          Clipboard.setStringAsync(PLAY_URL);
           break;
         case 'whatsapp':
           Linking.openURL(`whatsapp://send?text=${encodeURIComponent(SHARE_MSG)}`).catch(() =>
@@ -50,7 +49,7 @@ export default function ShareSheet({ visible, onClose }) {
           break;
         case 'telegram':
           Linking.openURL(`tg://msg?text=${encodeURIComponent(SHARE_MSG)}`).catch(() =>
-            Linking.openURL(`https://t.me/share/url?url=${encodeURIComponent(PLAY_URL)}&text=${encodeURIComponent('🔥 Terabox Downloader - Download TeraBox files & watch videos FREE')}`)
+            Linking.openURL(`https://t.me/share/url?url=${encodeURIComponent(PLAY_URL)}&text=${encodeURIComponent('🔥 Insta Downloader - Fast Instagram Reels & Video Downloader')}`)
           );
           break;
         case 'instagram':
@@ -63,7 +62,7 @@ export default function ShareSheet({ visible, onClose }) {
           break;
         case 'twitter':
           Linking.openURL(`twitter://post?message=${encodeURIComponent(SHARE_MSG)}`).catch(() =>
-            Linking.openURL(`https://twitter.com/intent/tweet?text=${encodeURIComponent('Download fast terabox links + free watch videos without login')}&url=${encodeURIComponent(PLAY_URL)}`)
+            Linking.openURL(`https://twitter.com/intent/tweet?text=${encodeURIComponent('Download Instagram Reels & Videos fast!')}&url=${encodeURIComponent(PLAY_URL)}`)
           );
           break;
         case 'more':
@@ -79,7 +78,7 @@ export default function ShareSheet({ visible, onClose }) {
         <TouchableOpacity activeOpacity={1} style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
           <View style={styles.handle} />
           <Text style={styles.title}>Share App</Text>
-          <Text style={styles.subtitle}>Invite your friends to try TeraBox Downloader</Text>
+          <Text style={styles.subtitle}>Invite your friends to try Insta Downloader</Text>
 
           <View style={styles.grid}>
             {shareOptions.map((opt) => (

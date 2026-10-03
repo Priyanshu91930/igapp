@@ -1,11 +1,7 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { addHistoryItem, getHistory, getSettings } from './storage';
-import { resolveTeraboxLink } from './api';
-import { SegmentedDownloader, probeRangeSupport, computeConnections } from './segmentedDownload';
+import { addDownloadHistoryItem, getDownloadsHistory, removeDownloadHistoryItem } from './storage';
 import {
-  setupNotificationChannel,
   showDownloadNotification,
   updateDownloadNotification,
   showDownloadCompleteNotification,
@@ -13,33 +9,13 @@ import {
   dismissDownloadNotification,
 } from './notificationManager';
 
-async function getFreshDownloadUrl(item) {
-  if (!item || !item.url) return null;
-  try {
-    const settings = await getSettings();
-    const baseUrl = settings.apiBaseUrl || 'https://teraapi-six.vercel.app';
-    console.log('[DownloadManager] Auto-refreshing expired CDN link for TeraBox URL:', item.url);
-    const res = await resolveTeraboxLink(baseUrl, item.url);
-    if (res && res.downloadUrl) {
-      console.log('[DownloadManager] Fresh downloadUrl obtained:', res.downloadUrl.substring(0, 80));
-      return {
-        url: res.downloadUrl,
-        headers: res.downloadHeaders || {},
-      };
-    }
-  } catch (err) {
-    console.warn('[DownloadManager] URL refresh failed:', err.message);
-  }
-  return null;
-}
+// In-memory active downloads map
+const activeResumableDownloads = {};
 
-// In-memory mapping of active download instances and listeners
-const activeInstances = {};
-const listeners = {};
-const lastProgressTime = {};
-
-// Helper to format bytes
-function formatBytes(bytes, decimals = 2) {
+/**
+ * Format bytes to human readable string
+ */
+export function formatBytes(bytes, decimals = 2) {
   if (bytes === 0 || !bytes || isNaN(bytes)) return '0 B';
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
@@ -49,589 +25,240 @@ function formatBytes(bytes, decimals = 2) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
-// Helper to parse size string (e.g. "480.22 MB") back to bytes
-function parseSizeToBytes(sizeStr) {
-  if (!sizeStr || typeof sizeStr !== 'string') return 0;
-  const match = sizeStr.trim().match(/^([0-9.]+)\s*([A-Za-z]+)$/);
-  if (!match) return 0;
-  const value = parseFloat(match[1]);
-  const unit = match[2].toUpperCase();
-  const multipliers = {
-    'B': 1,
-    'KB': 1024,
-    'MB': 1024 * 1024,
-    'GB': 1024 * 1024 * 1024,
-    'TB': 1024 * 1024 * 1024 * 1024
-  };
-  return value * (multipliers[unit] || 1);
+/**
+ * Clean file name string for storage saving
+ */
+function sanitizeFileName(name, extension = 'mp4') {
+  const clean = (name || 'instagram_media')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .substring(0, 40);
+  return `${clean}_${Date.now()}.${extension}`;
 }
 
-// Helper to format remaining seconds into human-readable duration
-function formatTimeRemaining(seconds) {
-  if (!seconds || seconds <= 0 || isNaN(seconds)) return '--';
-  const secs = Math.round(seconds);
-  const d = Math.floor(secs / 86400);
-  const h = Math.floor((secs % 86400) / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
+/**
+ * Starts downloading Instagram media using Expo FileSystem
+ */
+export async function downloadInstagramMedia(item, onProgress) {
+  if (!item || (!item.downloadUrl && !item.url)) {
+    throw new Error('No valid download URL provided.');
+  }
 
-  if (d > 0) {
-    return `${d}d ${h}h`;
-  }
-  if (h > 0) {
-    return `${h}h ${m}m`;
-  }
-  if (m > 0) {
-    return `${m}m ${s}s`;
-  }
-  return `${s}s`;
-}
+  const downloadUrl = item.downloadUrl || item.url;
+  const isPhoto = item.type === 'Photo' || downloadUrl.match(/\.(jpg|jpeg|png|webp)/i);
+  const ext = isPhoto ? 'jpg' : 'mp4';
+  const fileName = sanitizeFileName(item.title || item.name, ext);
+  const displayTitle = item.title || fileName;
 
-// Notify all listeners of changes to an active download
-function notifyListeners(id, data) {
-  const inst = activeInstances[id];
-  const fileName = inst?.name || data?.name || data?.fileName;
-  const keys = [id, fileName].filter(Boolean);
-  const notified = new Set();
-  keys.forEach((key) => {
-    if (listeners[key]) {
-      listeners[key].forEach((cb) => {
-        if (!notified.has(cb)) {
-          notified.add(cb);
-          try {
-            cb({ ...data, id, fileName });
-          } catch (e) {
-            // ignore
-          }
-        }
-      });
+  const fileDir = `${FileSystem.documentDirectory}InstaDownloader/`;
+  
+  try {
+    const dirInfo = await FileSystem.getInfoAsync(fileDir);
+    if (!dirInfo.exists) {
+      await FileSystem.makeDirectoryAsync(fileDir, { intermediates: true });
     }
-  });
-}
+  } catch (e) {
+    console.log('[DownloadManager] Directory check:', e.message);
+  }
 
-// Main progress callback used by the legacy single-connection downloader
-function createProgressCallback(id, fileName, totalSizeStr, startTime) {
-  let lastNotifUpdate = 0;
-  return (progressEvent) => {
-    lastProgressTime[id] = Date.now();
-    const written = progressEvent.totalBytesWritten;
-    let total = progressEvent.totalBytesExpectedToWrite;
-    
-    // Fallback if total bytes expected to write is missing or invalid from CDN
-    if (!total || isNaN(total) || total <= 0) {
-      total = parseSizeToBytes(totalSizeStr);
-    }
-    
+  const fileUri = `${fileDir}${fileName}`;
+  const downloadId = item.id || `ig_${Date.now()}`;
+
+  let lastNotificationTime = 0;
+
+  const callback = (downloadProgress) => {
+    const totalBytes = downloadProgress.totalBytesWritten;
+    const expectedBytes = downloadProgress.totalBytesExpectedToWrite;
+    const progress = expectedBytes > 0 ? totalBytes / expectedBytes : 0.5;
+
     const now = Date.now();
-    const elapsed = (now - startTime) / 1000;
-    
-    let speed = '0 KB/s';
-    let timeRemaining = '--';
-    if (elapsed > 0) {
-      const bytesPerSec = written / elapsed;
-      speed = formatBytes(bytesPerSec) + '/s';
-      const remainingBytes = total - written;
-      const remSeconds = bytesPerSec > 0 && remainingBytes > 0 ? remainingBytes / bytesPerSec : 0;
-      timeRemaining = formatTimeRemaining(remSeconds);
+    const timeDiff = (now - lastTime) / 1000;
+
+    if (timeDiff >= 0.4) {
+      const bytesDiff = totalBytes - lastWritten;
+      const speed = bytesDiff / timeDiff;
+      if (speed > 0) {
+        currentSpeed = `${formatBytes(speed)}/s`;
+        if (expectedBytes > totalBytes) {
+          const remSecs = (expectedBytes - totalBytes) / speed;
+          if (remSecs < 60) currentTimeRem = `${Math.round(remSecs)}s`;
+          else currentTimeRem = `${Math.floor(remSecs / 60)}m ${Math.round(remSecs % 60)}s`;
+        }
+      }
+      lastTime = now;
+      lastWritten = totalBytes;
     }
 
-    const progress = total > 0 ? written / total : 0;
-    const bytesWrittenStr = formatBytes(written);
-    let totalBytesStr = formatBytes(total);
-    if (!total || isNaN(total) || total <= 0 || totalBytesStr === '0 B' || totalBytesStr.includes('NaN')) {
-      totalBytesStr = totalSizeStr || 'Unknown';
-    }
-
-    const update = {
-      fileName,
+    const progressData = {
+      downloadId,
       progress,
-      downloadSpeed: speed,
-      timeRemaining,
-      bytesWritten: bytesWrittenStr,
-      totalBytes: totalBytesStr,
-      status: 'downloading',
+      written: formatBytes(totalBytes),
+      total: expectedBytes > 0 ? formatBytes(expectedBytes) : 'Unknown',
+      percentage: Math.round(progress * 100),
+      speed: currentSpeed,
+      timeRemaining: currentTimeRem,
     };
 
-    notifyListeners(id, update);
+    if (onProgress) {
+      onProgress(progressData);
+    }
 
-    // Update notification every 2 seconds to avoid spam
-    if (now - lastNotifUpdate > 2000) {
-      lastNotifUpdate = now;
-      updateDownloadNotification(id, fileName, progress, bytesWrittenStr, totalBytesStr, speed, timeRemaining);
+    // Update status bar notification silently every 1.5 seconds
+    if (now - lastNotificationTime >= 1500) {
+      lastNotificationTime = now;
+      updateDownloadNotification(
+        downloadId,
+        displayTitle,
+        progress,
+        formatBytes(totalBytes),
+        expectedBytes > 0 ? formatBytes(expectedBytes) : '',
+        currentSpeed,
+        currentTimeRem
+      );
     }
   };
-}
 
-// Legacy single-connection downloader (fallback / small files)
-function runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size) {
-  const startTime = Date.now();
-  const download = FileSystem.createDownloadResumable(
-    downloadUrl,
-    fileUri,
-    { headers: downloadHeaders },
-    createProgressCallback(id, name, size, startTime)
-  );
-
-  activeInstances[id] = download;
-  activeInstances[id].name = name;
-
-  (async () => {
-    try {
-      const result = await download.downloadAsync();
-      if (result) {
-        if (result.status < 200 || result.status >= 300) {
-          throw new Error(`Server returned HTTP status ${result.status}`);
-        }
-        await updateHistoryStatus(id, 'downloaded', 1);
-        notifyListeners(id, { status: 'downloaded', progress: 1, fileName: name });
-        await showDownloadCompleteNotification(id, name);
-        delete activeInstances[id];
-        delete lastProgressTime[id];
-      }
-    } catch (e) {
-      if (e.message && e.message.includes('paused')) {
-        return;
-      }
-      await updateHistoryStatus(id, 'failed', 0);
-      notifyListeners(id, { status: 'failed', progress: 0, error: e.message, fileName: name });
-      await showDownloadFailedNotification(id, name);
-      delete activeInstances[id];
-      delete lastProgressTime[id];
-    }
-  })();
-}
-
-// Fast multi-connection (segmented) downloader for servers that support Range requests
-function runSegmented(id, name, fileUri, downloadUrl, downloadHeaders, totalBytes, connections, size) {
-  const startTime = Date.now();
-  const progressCallback = createProgressCallback(id, name, size, startTime);
-
-  const seg = new SegmentedDownloader({
-    url: downloadUrl,
-    fileUri,
-    headers: downloadHeaders,
-    totalBytes,
-    connections,
-    onProgress: (downloaded) => {
-      progressCallback({
-        totalBytesWritten: downloaded,
-        totalBytesExpectedToWrite: totalBytes,
-      });
-    },
-  });
-
-  activeInstances[id] = {
-    name,
-    type: 'segmented',
-    seg,
-    pause: async () => {
-      seg.pause();
-      const resumeData = JSON.stringify({
-        type: 'segmented',
-        url: downloadUrl,
-        fileUri,
-        headers: downloadHeaders,
-        totalBytes,
-        connections,
-      });
-      await updateHistoryStatus(id, 'paused', null, resumeData);
-      notifyListeners(id, { status: 'paused' });
-      await dismissDownloadNotification(id);
-    },
-    cancel: async () => {
-      seg.cancel();
-      await seg.cleanupParts();
-    },
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Encoding': 'gzip, deflate, br',
   };
 
-  (async () => {
-    try {
-      const result = await seg.start();
-      if (result.status === 'completed') {
-        await updateHistoryStatus(id, 'downloaded', 1);
-        notifyListeners(id, { status: 'downloaded', progress: 1 });
-        await showDownloadCompleteNotification(id, name);
-      }
-      delete activeInstances[id];
-    } catch (e) {
-      if (seg.cancelled || seg.paused) {
-        delete activeInstances[id];
-        delete lastProgressTime[id];
-        return;
-      }
-      // Segmented download failed — clean up parts and fall back to a single connection
-      await seg.cleanupParts();
-      try {
-        await FileSystem.deleteAsync(fileUri, { idempotent: true });
-      } catch (err) {
-        // ignore
-      }
-      delete activeInstances[id];
-      delete lastProgressTime[id];
-      runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size);
-    }
-  })();
-}
+  let downloadResult;
 
-const DOWNLOAD_META_KEY = '@teraapp/download_metadata';
-
-export async function saveDownloadMetadata(item) {
-  try {
-    const raw = await AsyncStorage.getItem(DOWNLOAD_META_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    if (item && item.name) {
-      map[item.name] = {
-        name: item.name,
-        size: item.size || 'Unknown',
-        thumbnail: item.thumbnail || '',
-        folderName: item.folderName || '',
-        url: item.url || '',
-        downloadedAt: item.downloadedAt || new Date().toISOString(),
-      };
-      await AsyncStorage.setItem(DOWNLOAD_META_KEY, JSON.stringify(map));
-    }
-  } catch (e) {}
-}
-
-export async function getDownloadMetadata() {
-  try {
-    const raw = await AsyncStorage.getItem(DOWNLOAD_META_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    return {};
-  }
-}
-
-export async function startDownload(name, downloadUrl, size = 'Unknown', thumbnail = '', downloadHeaders = {}, folderName = '', shareUrl = '') {
-  const safeName = name.replace(/[^\w\-. ]/g, '_');
-  const fileUri = FileSystem.documentDirectory + safeName;
-  const id = String(Date.now());
-
-  // Add a new entry to the history table as downloading and sync with Cloud
-  const historyItem = {
-    id,
-    name,
-    size,
-    url: shareUrl || downloadUrl,
-    dlink: downloadUrl,
-    thumbnail,
-    status: 'downloading',
-    progress: 0,
-    downloadedAt: new Date().toISOString(),
-    downloadHeaders: JSON.stringify(downloadHeaders),
-    folderName: folderName || '',
-  };
-
-  await saveDownloadMetadata(historyItem);
-  await addHistoryItem(historyItem);
-
-  // Ensure Android Notification Channel is created and initialized
-  await setupNotificationChannel();
-
-  // Show initial notification
-  await showDownloadNotification(id, name, 0);
-
-  // Try a fast segmented (multi-connection) download when the server supports Range requests
-  // Disable segmented downloading for proxy URLs to prevent Hostinger LiteSpeed 403 concurrent connection blocks
-  const isProxied = downloadUrl.includes('download.php');
-  const probe = !isProxied ? await probeRangeSupport(downloadUrl, downloadHeaders) : { supported: false };
-  if (probe.supported && probe.total > 0) {
-    const connections = computeConnections(probe.total);
-    if (connections > 1) {
-      runSegmented(id, name, fileUri, probe.url || downloadUrl, downloadHeaders, probe.total, connections, size);
-      return id;
-    }
-  }
-
-  runLegacy(id, name, fileUri, downloadUrl, downloadHeaders, size);
-  return id;
-}
-
-export async function pauseDownload(id) {
-  const inst = activeInstances[id];
-  if (!inst) return;
-
-  if (inst.type === 'segmented') {
-    try {
-      await inst.pause();
-    } catch (e) {
-      console.error('Failed to pause download:', e);
-    }
-    return;
-  }
+  // Show silent progress notification at start
+  showDownloadNotification(downloadId, displayTitle, 0);
 
   try {
-    const pauseResult = await inst.pauseAsync();
-    // Save resumeData to the history item so we can resume later
-    await updateHistoryStatus(id, 'paused', null, JSON.stringify(pauseResult));
-    notifyListeners(id, { status: 'paused' });
-    await dismissDownloadNotification(id);
-  } catch (e) {
-    console.error('Failed to pause download:', e);
-  }
-}
-
-export async function resumeDownload(id) {
-  // Read history item to get resumeData
-  const history = await getHistory();
-  const item = history.find((h) => h.id === id);
-  if (!item || !item.resumeData) return;
-
-  let resumeData = null;
-  try {
-    resumeData = JSON.parse(item.resumeData);
-  } catch (e) {
-    resumeData = null;
-  }
-
-  const resumeDataObj = (typeof resumeData === 'object' && resumeData !== null) ? resumeData : {};
-  let targetUrl = resumeDataObj.url || item.dlink || item.download_url || item.url;
-  let targetHeaders = resumeDataObj.headers || (item.downloadHeaders ? JSON.parse(item.downloadHeaders) : {});
-
-  // Probe whether the saved CDN URL is still active or expired (HTTP 403 / 400)
-  const probe = targetUrl ? await probeRangeSupport(targetUrl, targetHeaders) : { supported: false };
-  if ((!probe.supported || probe.total <= 0) && item.url) {
-    console.log('[DownloadManager] Saved CDN URL is expired or inaccessible. Auto-refreshing link from TeraBox API...');
-    const fresh = await getFreshDownloadUrl(item);
-    if (fresh && fresh.url) {
-      targetUrl = fresh.url;
-      targetHeaders = fresh.headers;
-      if (resumeDataObj) {
-        resumeDataObj.url = targetUrl;
-        resumeDataObj.headers = targetHeaders;
-        await updateHistoryStatus(id, 'paused', null, JSON.stringify(resumeDataObj));
-      }
-    }
-  }
-
-  // Resume a segmented download from its saved part files
-  if (resumeDataObj && resumeDataObj.type === 'segmented' && resumeDataObj.totalBytes > 0) {
-    const startTime = Date.now();
-    const progressCallback = createProgressCallback(id, item.name, item.size, startTime);
-
-    const seg = new SegmentedDownloader({
-      url: targetUrl,
-      fileUri: resumeDataObj.fileUri,
-      headers: targetHeaders,
-      totalBytes: resumeDataObj.totalBytes,
-      connections: resumeDataObj.connections || computeConnections(resumeDataObj.totalBytes),
-      onProgress: (downloaded) => {
-        progressCallback({
-          totalBytesWritten: downloaded,
-          totalBytesExpectedToWrite: resumeDataObj.totalBytes,
-        });
-      },
-    });
-
-    activeInstances[id] = {
-      type: 'segmented',
-      seg,
-      pause: async () => {
-        seg.pause();
-        await updateHistoryStatus(id, 'paused', null, JSON.stringify({
-          ...resumeDataObj,
-          url: targetUrl,
-          headers: targetHeaders,
-        }));
-        notifyListeners(id, { status: 'paused' });
-        await dismissDownloadNotification(id);
-      },
-      cancel: async () => {
-        seg.cancel();
-        await seg.cleanupParts();
-      },
-    };
-
-    await updateHistoryStatus(id, 'downloading');
-    notifyListeners(id, { status: 'downloading' });
-
-    (async () => {
-      try {
-        const result = await seg.start();
-        if (result.status === 'completed') {
-          await updateHistoryStatus(id, 'downloaded', 1);
-          notifyListeners(id, { status: 'downloaded', progress: 1 });
-          await showDownloadCompleteNotification(id, item.name);
-        }
-        delete activeInstances[id];
-      } catch (e) {
-        if (seg.cancelled || seg.paused) {
-          delete activeInstances[id];
-          return;
-        }
-        console.warn('[DownloadManager] Segmented download error during resume:', e.message);
-        // Attempt URL refresh and retry before falling back
-        const fresh = await getFreshDownloadUrl(item);
-        if (fresh && fresh.url) {
-          console.log('[DownloadManager] Retrying segmented resume with fresh URL...');
-          runSegmented(id, item.name, resumeDataObj.fileUri, fresh.url, fresh.headers, resumeDataObj.totalBytes, resumeDataObj.connections || 4, item.size);
-          return;
-        }
-
-        await seg.cleanupParts();
-        try {
-          await FileSystem.deleteAsync(resumeDataObj.fileUri, { idempotent: true });
-        } catch (err) {}
-        delete activeInstances[id];
-        runLegacy(id, item.name, resumeDataObj.fileUri, targetUrl, targetHeaders, item.size);
-      }
-    })();
-    return;
-  }
-
-  // Legacy single-connection resume
-  try {
-    const startTime = Date.now();
-    const nativeResumeStr = typeof resumeDataObj.resumeData === 'string'
-      ? resumeDataObj.resumeData
-      : (typeof item.resumeData === 'string' ? item.resumeData : null);
-
-    const downloadUrl = targetUrl;
-    const fileUri = resumeDataObj.fileUri || (FileSystem.documentDirectory + item.name.replace(/[^\w\-. ]/g, '_'));
-    const options = resumeDataObj.options || { headers: targetHeaders };
-
-    const download = FileSystem.createDownloadResumable(
+    const downloadResumable = FileSystem.createDownloadResumable(
       downloadUrl,
       fileUri,
-      options,
-      createProgressCallback(id, item.name, item.size, startTime),
-      nativeResumeStr
+      { headers },
+      callback
     );
 
-    activeInstances[id] = download;
-    await updateHistoryStatus(id, 'downloading');
-    notifyListeners(id, { status: 'downloading' });
-
-    (async () => {
-      try {
-        const result = await download.resumeAsync();
-        if (result) {
-          if (result.status < 200 || result.status >= 300) {
-            throw new Error(`Server returned HTTP status ${result.status}`);
-          }
-          await updateHistoryStatus(id, 'downloaded', 1);
-          notifyListeners(id, { status: 'downloaded', progress: 1 });
-          await showDownloadCompleteNotification(id, item ? item.name : 'File');
-          delete activeInstances[id];
-        }
-      } catch (e) {
-        if (e.message && e.message.includes('paused')) {
-          return;
-        }
-        await updateHistoryStatus(id, 'failed', 0);
-        notifyListeners(id, { status: 'failed', progress: 0, error: e.message });
-        await showDownloadFailedNotification(id, item ? item.name : 'File');
-        delete activeInstances[id];
-      }
-    })();
-  } catch (e) {
-    console.error('Failed to resume download:', e);
-  }
-}
-
-export async function cancelDownload(id) {
-  const inst = activeInstances[id];
-  if (inst) {
+    activeResumableDownloads[downloadId] = downloadResumable;
+    downloadResult = await downloadResumable.downloadAsync();
+    delete activeResumableDownloads[downloadId];
+  } catch (resumableErr) {
+    delete activeResumableDownloads[downloadId];
     try {
-      if (inst.type === 'segmented') {
-        inst.seg.cancel();
-        await inst.seg.cleanupParts();
-      } else {
-        await inst.pauseAsync();
-      }
-    } catch (e) {
-      // ignore
+      downloadResult = await FileSystem.downloadAsync(downloadUrl, fileUri, { headers });
+    } catch (err) {
+      showDownloadFailedNotification(downloadId, displayTitle);
+      throw err;
     }
   }
 
-  // Remove the history item and local file
-  const history = await getHistory();
-  const item = history.find((h) => h.id === id);
-  if (item) {
-    const safeName = item.name.replace(/[^\w\-. ]/g, '_');
-    const fileUri = FileSystem.documentDirectory + safeName;
-    try {
-      await FileSystem.deleteAsync(fileUri, { idempotent: true });
-    } catch (e) {
-      // ignore
-    }
+  if (!downloadResult || !downloadResult.uri) {
+    showDownloadFailedNotification(downloadId, displayTitle);
+    throw new Error('Download failed: file empty or saved location invalid.');
   }
 
-  const next = history.filter((h) => h.id !== id);
-  await AsyncStorage.setItem('@teraapp/history', JSON.stringify(next));
-
-  notifyListeners(id, { status: 'cancelled' });
-  await dismissDownloadNotification(id);
-  delete activeInstances[id];
-}
-
-// Utility to update history database entry status
-async function updateHistoryStatus(id, status, progress = null, resumeDataJson = null) {
-  const history = await getHistory();
-  const next = history.map((item) => {
-    if (item.id === id) {
-      const updated = { ...item, status };
-      if (progress !== null) updated.progress = progress;
-      if (resumeDataJson !== null) updated.resumeData = resumeDataJson;
-      return updated;
-    }
-    return item;
-  });
-  await AsyncStorage.setItem('@teraapp/history', JSON.stringify(next));
-}
-
-// Register real-time progress callbacks
-export function addDownloadListener(id, cb) {
-  if (!id) return () => {};
-  if (!listeners[id]) {
-    listeners[id] = [];
-  }
-  listeners[id].push(cb);
-  return () => removeDownloadListener(id, cb);
-}
-
-export function removeDownloadListener(id, cb) {
-  if (id && listeners[id]) {
-    listeners[id] = listeners[id].filter((x) => x !== cb);
-  }
-}
-
-export function isDownloading(id) {
-  return !!activeInstances[id];
-}
-
-// Stalled download auto-recovery mechanism (recovers background freezes)
-export async function forcePauseDownload(id) {
-  const inst = activeInstances[id];
-  if (!inst) return;
-
+  let sizeFormatted = 'HD Media';
   try {
-    if (inst.type === 'segmented') {
-      await inst.pause();
-    } else {
-      await inst.pauseAsync();
+    const fileInfo = await FileSystem.getInfoAsync(downloadResult.uri);
+    if (fileInfo.size) {
+      sizeFormatted = formatBytes(fileInfo.size);
     }
-  } catch (e) {
-    console.log('[Manager] Direct native pause failed, applying manual cleanup:', e.message);
-    // Manual recovery: Update state to paused
-    await updateHistoryStatus(id, 'paused');
-    notifyListeners(id, { status: 'paused' });
-    await dismissDownloadNotification(id);
-  } finally {
-    delete activeInstances[id];
-    delete lastProgressTime[id];
-  }
+  } catch (e) {}
+
+  const historyItem = {
+    id: downloadId,
+    name: fileName,
+    title: item.title || 'Instagram Media',
+    type: item.type || (isPhoto ? 'Photo' : 'Reel'),
+    url: downloadUrl,
+    originalUrl: item.originalUrl || downloadUrl,
+    fileUri: downloadResult.uri,
+    thumbnail: item.thumbnail || downloadResult.uri,
+    sizeFormatted: sizeFormatted || item.sizeFormatted || 'Saved',
+    downloadedAt: new Date().toISOString(),
+  };
+
+  await addDownloadHistoryItem(historyItem);
+
+  // Show complete notification
+  showDownloadCompleteNotification(downloadId, displayTitle);
+
+  return historyItem;
 }
 
-export async function verifyActiveDownloads() {
-  const now = Date.now();
-  for (const id of Object.keys(activeInstances)) {
-    const lastUpdate = lastProgressTime[id] || 0;
-    // If no progress updates for more than 10 seconds, the download has stalled/frozen
-    if (lastUpdate > 0 && now - lastUpdate > 10000) {
-      console.log(`[Manager] Stalled background download detected: ${id}. Pausing/resetting.`);
-      await forcePauseDownload(id);
-    }
+/**
+ * Cancel an active download by ID
+ */
+export async function cancelDownload(downloadId) {
+  if (activeResumableDownloads[downloadId]) {
+    try {
+      await activeResumableDownloads[downloadId].cancelAsync();
+    } catch (e) {}
+    delete activeResumableDownloads[downloadId];
   }
+  dismissDownloadNotification(downloadId);
 }
 
+/**
+ * Pause an active download by ID
+ */
+export async function pauseDownload(downloadId) {
+  if (activeResumableDownloads[downloadId]) {
+    try {
+      await activeResumableDownloads[downloadId].pauseAsync();
+      dismissDownloadNotification(downloadId);
+      return true;
+    } catch (e) {
+      console.log('Pause error:', e.message);
+    }
+  }
+  return false;
+}
+
+/**
+ * Resume a paused download by ID
+ */
+export async function resumeDownload(downloadId) {
+  if (activeResumableDownloads[downloadId]) {
+    try {
+      await activeResumableDownloads[downloadId].resumeAsync();
+      return true;
+    } catch (e) {
+      console.log('Resume error:', e.message);
+    }
+  }
+  return false;
+}
+
+/**
+ * Share downloaded file
+ */
+export async function shareFile(fileUri) {
+  if (!fileUri) return;
+  const isAvailable = await Sharing.isAvailableAsync();
+  if (!isAvailable) {
+    throw new Error('Sharing is not supported on this device.');
+  }
+  await Sharing.shareAsync(fileUri);
+}
+
+/**
+ * Get list of downloaded media files
+ */
+export async function getDownloadedItems() {
+  return await getDownloadsHistory();
+}
+
+/**
+ * Delete downloaded file and remove from history
+ */
+export async function deleteDownloadedItem(id, fileUri) {
+  if (fileUri) {
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      if (fileInfo.exists) {
+        await FileSystem.deleteAsync(fileUri, { idempotent: true });
+      }
+    } catch (e) {
+      console.warn('Failed to delete physical file:', e.message);
+    }
+  }
+  return await removeDownloadHistoryItem(id);
+}

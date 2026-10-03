@@ -1,47 +1,45 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 
-// Configure how notifications appear when app is in foreground
+// Configure how notifications appear when app is in foreground or background
 Notifications.setNotificationHandler({
-  handleNotification: async (notification) => {
-    // Show banner & sound for remote Firebase Push Notifications, silent for download progress
-    const isRemote = notification && notification.request && notification.request.trigger && (
-      notification.request.trigger.type === 'push' || notification.request.trigger.type === 'remote'
-    );
-    return {
-      shouldShowBanner: isRemote,
-      shouldShowList: true,
-      shouldPlaySound: isRemote,
-      shouldSetBadge: isRemote,
-    };
-  },
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
 });
 
-// Request notification permissions (Android 13+)
+// Request notification permissions (Android 13+ & iOS)
 export async function requestNotificationPermission() {
-  if (Platform.OS === 'android') {
-    const { status } = await Notifications.requestPermissionsAsync();
-    return status === 'granted';
+  if (Platform.OS === 'android' || Platform.OS === 'ios') {
+    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+    if (existingStatus !== 'granted') {
+      const { status } = await Notifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+    return finalStatus === 'granted';
   }
   return true;
 }
 
-// Set up Android notification channels (silent for downloads, default for alerts/push)
+// Set up Android notification channels
 export async function setupNotificationChannel() {
   if (Platform.OS === 'android') {
-    // 1. Silent channel for progress updates (no sound, no heads-up)
-    await Notifications.setNotificationChannelAsync('downloads_silent', {
+    // 1. Silent channel for live progress updates (no sound / vibrate on every % tick)
+    await Notifications.setNotificationChannelAsync('download_progress_channel', {
       name: 'Download Progress',
       importance: Notifications.AndroidImportance.LOW,
       sound: null,
-      vibrationPattern: null,
       enableVibrate: false,
       showBadge: false,
     });
 
-    // 2. Alerting channel for download finish/fail & push notifications
-    await Notifications.setNotificationChannelAsync('downloads_alerts', {
-      name: 'Notifications & Alerts',
+    // 2. High priority channel for download completed / failed alerts
+    await Notifications.setNotificationChannelAsync('downloads_channel', {
+      name: 'Download Completion Alerts',
       importance: Notifications.AndroidImportance.HIGH,
       sound: 'default',
       vibrationPattern: [0, 250, 250, 250],
@@ -51,93 +49,24 @@ export async function setupNotificationChannel() {
   }
 }
 
-// Register and initialize Firebase Remote Push Notifications
-export async function setupFirebaseRemoteNotifications() {
+// Initialize notification services on app start
+export async function initNotificationService() {
   try {
-    const granted = await requestNotificationPermission();
-    if (!granted) return;
-
-    if (Platform.OS === 'android') {
-      try {
-        const token = await Notifications.getDevicePushTokenAsync();
-        console.log('[Firebase FCM] Device FCM Push Token:', token?.data);
-      } catch (tokenErr) {
-        console.log('[Firebase FCM] Device token registration info:', tokenErr.message);
-      }
-    }
-
-    // Auto-save incoming remote push notifications (Firebase FCM) to local notification history
-    Notifications.addNotificationReceivedListener((notification) => {
-      try {
-        const req = notification?.request;
-        const content = req?.content;
-        const trigger = req?.trigger;
-
-        const isPush = trigger && (trigger.type === 'push' || trigger.type === 'remote');
-        const title = (content?.title || '').toLowerCase();
-        const isDownload = title.includes('downloading') || title.includes('download complete') || title.includes('download failed');
-
-        if (content && isPush && !isDownload) {
-          import('./notificationStorage').then(({ saveInAppNotification }) => {
-            saveInAppNotification({
-              title: content.title || 'New Notification',
-              body: content.body || '',
-              data: content.data || {},
-            });
-          });
-        }
-      } catch (e) {}
-    });
-
-    // Handle deep link / URL navigation when user taps a push notification
-    Notifications.addNotificationResponseReceivedListener((response) => {
-      try {
-        const req = response?.notification?.request;
-        const content = req?.content;
-        const trigger = req?.trigger;
-        const data = content?.data;
-
-        const isPush = trigger && (trigger.type === 'push' || trigger.type === 'remote');
-        const title = (content?.title || '').toLowerCase();
-        const isDownload = title.includes('downloading') || title.includes('download complete') || title.includes('download failed');
-
-        if (content && isPush && !isDownload) {
-          import('./notificationStorage').then(({ saveInAppNotification }) => {
-            saveInAppNotification({
-              title: content.title || 'New Notification',
-              body: content.body || '',
-              data: content.data || {},
-            });
-          });
-        }
-        if (data && data.url) {
-          import('expo-linking').then((Linking) => {
-            Linking.openURL(data.url).catch(() => {});
-          });
-        }
-      } catch (e) {
-        console.log('[Firebase FCM] Tap listener error:', e.message);
-      }
-    });
-  } catch (err) {
-    console.log('[Firebase FCM] Push notification setup error:', err.message);
+    await requestNotificationPermission();
+    await setupNotificationChannel();
+  } catch (e) {
+    console.log('[NotificationService] Init error:', e.message);
   }
 }
 
-const PROGRESS_COLOR = '#3B82F6';
-const SUCCESS_COLOR = '#22C55E';
-const ERROR_COLOR = '#EF4444';
-
-// On Android the channel is selected through the trigger, not the content.
-function channelTrigger(channelId) {
+function channelTrigger(channelId = 'downloads_channel') {
   if (Platform.OS === 'android') {
     return { channelId };
   }
   return null;
 }
 
-// Show a download progress notification
-// Returns the notification identifier to update/cancel later
+// Show a download progress notification (Silent channel)
 export async function showDownloadNotification(id, fileName, progress = 0) {
   const percent = Math.round(progress * 100);
 
@@ -145,20 +74,20 @@ export async function showDownloadNotification(id, fileName, progress = 0) {
     await Notifications.scheduleNotificationAsync({
       identifier: `download_${id}`,
       content: {
-        title: 'Downloading...',
-        body: `${fileName}\n${percent}%`,
-        color: PROGRESS_COLOR,
-        sticky: true,           // Cannot be dismissed by user while downloading
+        title: `Downloading (${percent}%)`,
+        body: fileName,
+        color: '#E1306C',
+        sticky: true,
         priority: 'low',
       },
-      trigger: channelTrigger('downloads_silent'), // Show immediately
+      trigger: channelTrigger('download_progress_channel'),
     });
   } catch (e) {
-    console.log('Notification error:', e);
+    console.log('Notification error:', e.message);
   }
 }
 
-// Update the progress notification in place (same identifier => one card only)
+// Update download progress notification (Silent channel)
 export async function updateDownloadNotification(
   id,
   fileName,
@@ -178,68 +107,62 @@ export async function updateDownloadNotification(
     await Notifications.scheduleNotificationAsync({
       identifier: `download_${id}`,
       content: {
-        title: `Downloading ${percent}%`,
-        body: `${fileName}\n${detail}`.trim(),
-        color: PROGRESS_COLOR,
+        title: `Downloading (${percent}%)`,
+        body: `${fileName}${detail ? '\n' + detail : ''}`.trim(),
+        color: '#E1306C',
         sticky: true,
         priority: 'low',
       },
-      trigger: channelTrigger('downloads_silent'),
+      trigger: channelTrigger('download_progress_channel'),
     });
   } catch (e) {
-    console.log('Notification update error:', e);
+    console.log('Notification update error:', e.message);
   }
 }
 
-// Show download complete notification
+// Show download complete notification (High priority channel)
 export async function showDownloadCompleteNotification(id, fileName) {
   try {
-    // First, dismiss the ongoing silent progress notification
     await Notifications.dismissNotificationAsync(`download_${id}`);
-
-    // Present the complete alert notification
     await Notifications.scheduleNotificationAsync({
-      identifier: `download_${id}`,
+      identifier: `complete_${id}`,
       content: {
-        title: 'Download Complete',
+        title: 'Download Complete! 🎉',
         body: fileName,
-        color: SUCCESS_COLOR,
-        priority: 'default',
+        color: '#10B981',
+        priority: 'high',
       },
-      trigger: channelTrigger('downloads_alerts'),
+      trigger: channelTrigger('downloads_channel'),
     });
   } catch (e) {
-    console.log('Complete notification error:', e);
+    console.log('Complete notification error:', e.message);
   }
 }
 
 // Show download failed notification
 export async function showDownloadFailedNotification(id, fileName) {
   try {
-    // First, dismiss the ongoing silent progress notification
     await Notifications.dismissNotificationAsync(`download_${id}`);
-
-    // Present the failed alert notification
     await Notifications.scheduleNotificationAsync({
-      identifier: `download_${id}`,
+      identifier: `failed_${id}`,
       content: {
-        title: 'Download Failed',
+        title: 'Download Failed ❌',
         body: fileName,
-        color: ERROR_COLOR,
-        priority: 'default',
+        color: '#EF4444',
+        priority: 'high',
       },
-      trigger: channelTrigger('downloads_alerts'),
+      trigger: channelTrigger('downloads_channel'),
     });
   } catch (e) {
-    console.log('Failed notification error:', e);
+    console.log('Failed notification error:', e.message);
   }
 }
 
-// Dismiss a notification (on pause/cancel)
+// Dismiss download notification
 export async function dismissDownloadNotification(id) {
   try {
     await Notifications.dismissNotificationAsync(`download_${id}`);
   } catch (e) {
-    console.log('Dismiss notification error:', e);
+    console.log('Dismiss notification error:', e.message);
   }
 }
