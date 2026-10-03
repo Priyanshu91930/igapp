@@ -44,6 +44,7 @@ export default function HistoryScreen({ navigation }) {
   const [playerVisible, setPlayerVisible] = useState(false);
   const [playerSource, setPlayerSource] = useState(null);
   const [playerName, setPlayerName] = useState(null);
+  const [bannerAdError, setBannerAdError] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -296,11 +297,16 @@ export default function HistoryScreen({ navigation }) {
         isPremium={isPremiumUser}
       />
 
-      {!isPremiumUser && (
+      {!isPremiumUser && !bannerAdError && (
         <View style={styles.bannerContainer}>
           <BannerAd
             unitId={AD_UNIT_IDS.BANNER_4}
             size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            onAdLoaded={() => setBannerAdError(false)}
+            onAdFailedToLoad={(error) => {
+              console.log('History Banner Ad failed to load:', error.message);
+              setBannerAdError(true);
+            }}
           />
         </View>
       )}

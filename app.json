@@ -2,7 +2,7 @@
   "expo": {
     "name": "Tera Downloader",
     "slug": "teradownloader",
-    "version": "2.3.0",
+    "version": "2.5.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -16,7 +16,7 @@
       },
       "package": "com.anihub.teradownloader",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 23,
+      "versionCode": 25,
       "permissions": [
         "com.android.vending.BILLING"
       ]

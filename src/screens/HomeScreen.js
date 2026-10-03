@@ -31,6 +31,7 @@ import SubscriptionModal from '../components/SubscriptionModal';
 import { checkAndPromptInAppReview } from '../services/storeReview';
 import { getStoredUser, fetchFreshUserStatus, checkIsPremium } from '../services/authService';
 import PlayerScreen from './PlayerScreen';
+import UpdateBannerTicker from '../components/UpdateBannerTicker';
 import {
   startDownload,
   pauseDownload,
@@ -158,6 +159,18 @@ export default function HomeScreen({ navigation }) {
   const [showShareSheet, setShowShareSheet] = useState(false);
   const [bannerAdLoaded, setBannerAdLoaded] = useState(false);
   const [topBannerAdLoaded, setTopBannerAdLoaded] = useState(false);
+  const [showTopBanner, setShowTopBanner] = useState(false);
+  const [bannerAdError, setBannerAdError] = useState(false);
+  const [topBannerAdError, setTopBannerAdError] = useState(false);
+
+  // Stagger Top Banner Ad request by 2.5s to prevent simultaneous AdMob collision with Bottom Banner
+  useEffect(() => {
+    if (isPremiumUser) return;
+    const timer = setTimeout(() => {
+      setShowTopBanner(true);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [isPremiumUser]);
 
   // User Auth & Subscription Modal states
   const [user, setUser] = useState(null);
@@ -453,25 +466,36 @@ export default function HomeScreen({ navigation }) {
         folderName: folderTitle,
       })).filter(item => item.dlink || item.download_url);
 
+      const isFolder = Boolean(
+        data.isFolder ||
+        data.isFolderRestricted ||
+        formattedFiles.length > 1 ||
+        (data.list && data.list.length > 1) ||
+        (data.rawList && data.rawList.length > 1) ||
+        (data.rawJson && (data.rawJson.isFolder || data.rawJson.isFolderRestricted || data.rawJson.code === 'VIP_REQUIRED_FOR_FOLDERS'))
+      );
+
+      console.log(`[Resolve] Resolved link. isFolder=${isFolder}, isPremiumUser=${isPremiumUser}, formattedCount=${formattedFiles.length}`);
+
+      if (isFolder && !isPremiumUser) {
+        setResult(null);
+        setError('');
+        Alert.alert(
+          '⭐ VIP Premium Required',
+          'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
+          [
+            { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
+            { text: 'Cancel', style: 'cancel' },
+          ]
+        );
+        return;
+      }
+
       if (formattedFiles.length === 0) {
         throw new Error('Could not find any downloadable files for this link.');
       }
 
-      console.log(`[Resolve] Resolved ${formattedFiles.length} file(s) for link`);
       if (formattedFiles.length > 1) {
-        if (!isPremiumUser) {
-          setResult(null);
-          Alert.alert(
-            '⭐ VIP Premium Required',
-            'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
-            [
-              { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
-              { text: 'Cancel', style: 'cancel' },
-            ]
-          );
-          return;
-        }
-
         const folderResult = {
           isFolder: true,
           name: folderTitle || `Folder (${formattedFiles.length} Files)`,
@@ -501,7 +525,30 @@ export default function HomeScreen({ navigation }) {
         console.log('Failed to auto-save history:', histErr.message);
       }
     } catch (e) {
-      setError(e.message || 'Failed to resolve link. Please try again.');
+      console.log('[Resolve Error]:', e.code, e.message);
+      setResult(null);
+      const isVipFolderError = 
+        e.code === 'VIP_REQUIRED_FOR_FOLDERS' ||
+        (e.message && (
+          e.message.includes('VIP') ||
+          e.message.includes('exclusive to VIP') ||
+          e.message.includes('Folders contain multiple files') ||
+          e.message.includes('Folder')
+        ));
+
+      if (isVipFolderError && !isPremiumUser) {
+        setError('');
+        Alert.alert(
+          '⭐ VIP Premium Required',
+          'TeraBox Folder Download is an exclusive VIP feature. Please upgrade to VIP Premium to access and download full multi-file folders!',
+          [
+            { text: 'Upgrade to VIP', onPress: () => setShowSubscriptionModal(true) },
+            { text: 'Cancel', style: 'cancel' },
+          ]
+        );
+      } else {
+        setError(e.message || 'Failed to resolve link. Please try again.');
+      }
     } finally {
       setParsing(false);
     }
@@ -939,15 +986,19 @@ export default function HomeScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Banner Ad 2 - Placed above Supported TeraBox Formats (Disabled for Premium Users) */}
-          {!isPremiumUser && (
+          {/* Banner Ad 2 - Placed above Supported TeraBox Formats (Staggered by 2.5s to prevent AdMob collision) */}
+          {!isPremiumUser && showTopBanner && !topBannerAdError && (
             <View style={[styles.bannerAdContainer, { marginVertical: 8, borderRadius: 8 }]}>
               <BannerAd
                 unitId={AD_UNIT_IDS.BANNER_2}
                 size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-                onAdLoaded={() => setTopBannerAdLoaded(true)}
+                onAdLoaded={() => {
+                  setTopBannerAdLoaded(true);
+                  setTopBannerAdError(false);
+                }}
                 onAdFailedToLoad={(error) => {
                   console.log('Top Banner Ad failed to load:', error.message);
+                  setTopBannerAdError(true);
                 }}
               />
             </View>
@@ -1224,15 +1275,32 @@ export default function HomeScreen({ navigation }) {
         }}
       />
 
+      {/* Dynamic Firebase Update Announcement Ticker */}
+      <UpdateBannerTicker
+        isFocused={isFocused}
+        onSelectLink={async (link) => {
+          if (!link) return;
+          try {
+            await Linking.openURL(link);
+          } catch (e) {
+            console.log('[Announcement] Open URL error:', e.message);
+          }
+        }}
+      />
+
       {/* Banner Ad - Disabled for Premium Users */}
-      {!isPremiumUser && (
+      {!isPremiumUser && !bannerAdError && (
         <View style={styles.bannerAdContainer}>
           <BannerAd
             unitId={AD_UNIT_IDS.BANNER_1}
             size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-            onAdLoaded={() => setBannerAdLoaded(true)}
+            onAdLoaded={() => {
+              setBannerAdLoaded(true);
+              setBannerAdError(false);
+            }}
             onAdFailedToLoad={(error) => {
               console.log('Banner Ad failed to load:', error.message);
+              setBannerAdError(true);
             }}
           />
         </View>

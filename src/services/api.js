@@ -39,13 +39,21 @@ export async function resolveTeraboxLink(baseUrl, url, quality = 'auto', isVip =
 
   if (!res.ok) {
     let errMsg = `Server error: ${res.status}`;
+    let errCode = '';
     try {
       const errJson = await res.json();
-      if (errJson && (errJson.error || errJson.message)) {
-        errMsg = errJson.error || errJson.message;
+      if (errJson) {
+        if (errJson.error || errJson.message) {
+          errMsg = errJson.error || errJson.message;
+        }
+        if (errJson.code) {
+          errCode = errJson.code;
+        }
       }
     } catch (e) {}
-    throw new Error(errMsg);
+    const errorObj = new Error(errMsg);
+    errorObj.code = errCode;
+    throw errorObj;
   }
 
   const json = await res.json();
@@ -79,6 +87,15 @@ export async function resolveTeraboxLink(baseUrl, url, quality = 'auto', isVip =
   const resolvedHeaders = list.length > 0 ? list[0].downloadHeaders : baseHeaders;
   const resolvedStreamUrl = list.length > 0 ? list[0].stream_url : (json.stream_url || '');
 
+  const isFolderDetected = Boolean(
+    json.isFolderRestricted || 
+    json.isFolder || 
+    data.isFolderRestricted || 
+    data.isFolder || 
+    (data.list && data.list.length > 1) ||
+    rawItems.length > 1
+  );
+
   return {
     name: file?.name || json.name || 'video.mp4',
     size: file?.size || json.size || 'Unknown',
@@ -88,6 +105,11 @@ export async function resolveTeraboxLink(baseUrl, url, quality = 'auto', isVip =
     downloadHeaders: resolvedHeaders,
     stream_url: resolvedStreamUrl,
     list,
+    rawList: rawItems,
+    isFolder: isFolderDetected,
+    isFolderRestricted: Boolean(json.isFolderRestricted || data.isFolderRestricted),
+    title: json.title || data.title || '',
+    rawJson: json,
   };
 }
 

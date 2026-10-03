@@ -34,6 +34,7 @@ export default function DownloadScreen() {
   const [downloads, setDownloads] = useState([]);
   const [activeUpdates, setActiveUpdates] = useState({});
   const [bannerAdLoaded, setBannerAdLoaded] = useState(false);
+  const [bannerAdError, setBannerAdError] = useState(false);
   const [user, setUser] = useState(null);
 
   // Video player modal state
@@ -517,14 +518,18 @@ export default function DownloadScreen() {
       />
 
       {/* Banner Ad - Disabled for Premium Users */}
-      {!isPremiumUser && (
+      {!isPremiumUser && !bannerAdError && (
         <View style={styles.bannerAdContainer}>
           <BannerAd
             unitId={AD_UNIT_IDS.BANNER_3}
             size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-            onAdLoaded={() => setBannerAdLoaded(true)}
+            onAdLoaded={() => {
+              setBannerAdLoaded(true);
+              setBannerAdError(false);
+            }}
             onAdFailedToLoad={(error) => {
               console.log('Banner Ad failed to load:', error.message);
+              setBannerAdError(true);
             }}
           />
         </View>

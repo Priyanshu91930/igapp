@@ -20,6 +20,7 @@ import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-si
 import { getStoredUser, checkIsPremium, syncGoogleUser, logoutUser } from '../services/authService';
 import SubscriptionModal from '../components/SubscriptionModal';
 import NotificationCenterModal from '../components/NotificationCenterModal';
+import AnnouncementsModal from '../components/AnnouncementsModal';
 import {
   getInAppNotifications,
   getUnreadNotificationCount,
@@ -232,9 +233,11 @@ export default function SettingsScreen({ navigation }) {
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [showManageModal, setShowManageModal] = useState(false);
   const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [showAnnouncementsModal, setShowAnnouncementsModal] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [bannerAdError, setBannerAdError] = useState(false);
 
   const loadNotifications = useCallback(async () => {
     const list = await getInAppNotifications();
@@ -481,6 +484,23 @@ export default function SettingsScreen({ navigation }) {
             <TouchableOpacity
               style={styles.rowItem}
               activeOpacity={0.7}
+              onPress={() => setShowAnnouncementsModal(true)}
+            >
+              <View style={[styles.iconCircle, { backgroundColor: '#EFF6FF' }]}>
+                <Ionicons name="megaphone-outline" size={18} color="#2563EB" />
+              </View>
+              <View style={styles.rowTextCol}>
+                <Text style={styles.rowLabel}>Announcements & Updates</Text>
+                <Text style={styles.rowSubtitle}>View all news, anime releases & app updates</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#A1A1AA" />
+            </TouchableOpacity>
+
+            <View style={styles.divider} />
+
+            <TouchableOpacity
+              style={styles.rowItem}
+              activeOpacity={0.7}
               onPress={() => navigation?.navigate('Downloads')}
             >
               <View style={[styles.iconCircle, { backgroundColor: '#F4F4F5' }]}>
@@ -685,11 +705,22 @@ export default function SettingsScreen({ navigation }) {
         }}
       />
 
-      {!isPremiumUser && (
+      {/* Announcements & Updates Modal */}
+      <AnnouncementsModal
+        visible={showAnnouncementsModal}
+        onClose={() => setShowAnnouncementsModal(false)}
+      />
+
+      {!isPremiumUser && !bannerAdError && (
         <View style={styles.bannerContainer}>
           <BannerAd
             unitId={AD_UNIT_IDS.BANNER_5}
             size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            onAdLoaded={() => setBannerAdError(false)}
+            onAdFailedToLoad={(error) => {
+              console.log('Settings Banner Ad failed to load:', error.message);
+              setBannerAdError(true);
+            }}
           />
         </View>
       )}
