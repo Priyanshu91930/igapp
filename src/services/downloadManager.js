@@ -62,7 +62,10 @@ export async function downloadInstagramMedia(item, onProgress) {
 
   const fileUri = `${fileDir}${fileName}`;
   const downloadId = item.id || `ig_${Date.now()}`;
-
+  let lastTime = Date.now();
+  let lastWritten = 0;
+  let currentSpeed = '0 B/s';
+  let currentTimeRem = '0s';
   let lastNotificationTime = 0;
 
   const callback = (downloadProgress) => {

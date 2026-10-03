@@ -99,28 +99,54 @@ export default function App() {
     let appOpenAd = null;
     let unsubLoaded = null;
     let unsubError = null;
+    let appStateSub = null;
+    let isAdShowing = false;
 
-    try {
-      appOpenAd = AppOpenAd.createForAdRequest(AD_UNIT_IDS.APP_OPEN, {});
+    const loadAndShowAppOpenAd = () => {
+      try {
+        if (!appOpenAd) {
+          appOpenAd = AppOpenAd.createForAdRequest(AD_UNIT_IDS.APP_OPEN, {
+            requestNonPersonalizedAdsOnly: false,
+          });
 
-      unsubLoaded = appOpenAd.addAdEventListener(AdEventType.LOADED, () => {
-        appOpenAd.show().catch((err) => {
-          console.log('[AdMob] App Open Ad show error:', err.message);
-        });
-      });
+          unsubLoaded = appOpenAd.addAdEventListener(AdEventType.LOADED, () => {
+            if (!isAdShowing) {
+              isAdShowing = true;
+              appOpenAd.show().catch((err) => {
+                isAdShowing = false;
+                console.log('[AdMob] App Open Ad show error:', err.message);
+              });
+            }
+          });
 
-      unsubError = appOpenAd.addAdEventListener(AdEventType.ERROR, (error) => {
-        console.log('[AdMob] App Open Ad load error:', error.message);
-      });
+          unsubError = appOpenAd.addAdEventListener(AdEventType.ERROR, (error) => {
+            isAdShowing = false;
+            console.log('[AdMob] App Open Ad load error:', error.message);
+          });
+        }
+        appOpenAd.load();
+      } catch (err) {
+        console.log('[AdMob] App Open Ad init exception:', err.message);
+      }
+    };
 
-      appOpenAd.load();
-    } catch (err) {
-      console.log('[AdMob] App Open Ad init exception:', err.message);
-    }
+    loadAndShowAppOpenAd();
+
+    // Listen for background -> foreground transition
+    const { AppState } = require('react-native');
+    let prevAppState = AppState.currentState;
+    appStateSub = AppState.addEventListener('change', (nextAppState) => {
+      if (prevAppState.match(/inactive|background/) && nextAppState === 'active') {
+        isAdShowing = false;
+        loadAndShowAppOpenAd();
+      }
+      prevAppState = nextAppState;
+    });
 
     return () => {
       if (unsubLoaded) unsubLoaded();
       if (unsubError) unsubError();
+      if (appStateSub) appStateSub.remove();
     };
   }, []);
 

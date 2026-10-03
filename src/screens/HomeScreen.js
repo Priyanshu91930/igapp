@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,11 @@ import { validateInstagramUrl, resolveInstagramMedia } from '../services/Instagr
 import { downloadInstagramMedia, cancelDownload, shareFile } from '../services/downloadManager';
 import { getSettings } from '../services/storage';
 import { AD_UNIT_IDS, ADS_ENABLED } from '../services/adConfig';
+import {
+  initAllRewardedAds,
+  showGetFilesAdIfAvailable,
+  showStartDownloadAdIfAvailable,
+} from '../services/rewardedAdService';
 import ShareSheet from '../components/ShareSheet';
 import VideoPlayerModal from '../components/VideoPlayerModal';
 
@@ -42,6 +47,10 @@ export default function HomeScreen({ navigation }) {
   const [showPlayerModal, setShowPlayerModal] = useState(false);
   const [showSupportedFormats, setShowSupportedFormats] = useState(false);
 
+  useEffect(() => {
+    initAllRewardedAds();
+  }, []);
+
   // Downloading State & Image 2 Detailed Metrics
   const [downloading, setDownloading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -56,12 +65,15 @@ export default function HomeScreen({ navigation }) {
 
   const theme = lightTheme;
 
+  const [selection, setSelection] = useState(undefined);
+
   const handlePaste = async () => {
     try {
       const text = await Clipboard.getStringAsync();
       if (text) {
         setInputUrl(text);
         setErrorMsg('');
+        setSelection({ start: 0, end: 0 });
       }
     } catch (e) {
       console.log('Clipboard read failed', e);
@@ -74,6 +86,7 @@ export default function HomeScreen({ navigation }) {
     setResolvedMedia(null);
     setDownloadSuccess(null);
     setIsPaused(false);
+    setSelection(undefined);
   };
 
   const handleResolve = async () => {
@@ -91,7 +104,16 @@ export default function HomeScreen({ navigation }) {
     setLoading(true);
     try {
       const settings = await getSettings();
-      const mediaInfo = await resolveInstagramMedia(settings.apiBaseUrl, validation.url);
+
+      // Trigger Rewarded Ad & URL Resolution in PARALLEL
+      const adPromise = showGetFilesAdIfAvailable();
+      const resolvePromise = resolveInstagramMedia(settings.apiBaseUrl, validation.url);
+
+      const [adResult, mediaInfo] = await Promise.all([
+        adPromise.catch(() => false),
+        resolvePromise,
+      ]);
+
       setResolvedMedia(mediaInfo);
     } catch (err) {
       setErrorMsg(err.message || 'This Instagram media could not be downloaded.');
@@ -114,7 +136,9 @@ export default function HomeScreen({ navigation }) {
     });
 
     try {
-      const downloadedItem = await downloadInstagramMedia(
+      // Trigger Start Download Rewarded Ad & File Download in PARALLEL
+      const adPromise = showStartDownloadAdIfAvailable();
+      const downloadPromise = downloadInstagramMedia(
         mediaInfo,
         (progressData) => {
           setDownloadStats({
@@ -126,6 +150,11 @@ export default function HomeScreen({ navigation }) {
           });
         }
       );
+
+      const [adShown, downloadedItem] = await Promise.all([
+        adPromise.catch(() => false),
+        downloadPromise,
+      ]);
 
       setDownloadSuccess(downloadedItem);
       Alert.alert('Download Complete!', 'Instagram media has been saved to your downloads.');
@@ -231,8 +260,13 @@ export default function HomeScreen({ navigation }) {
               placeholder="https://www.instagram.com/reel/1xxxxxxx"
               placeholderTextColor={theme.textMuted}
               value={inputUrl}
+              selection={selection}
+              onSelectionChange={(e) => {
+                setSelection(e.nativeEvent.selection);
+              }}
               onChangeText={(text) => {
                 setInputUrl(text);
+                setSelection(undefined);
                 if (errorMsg) setErrorMsg('');
               }}
               autoCapitalize="none"
@@ -527,9 +561,18 @@ export default function HomeScreen({ navigation }) {
                 </LinearGradient>
               </TouchableOpacity>
             )}
-          </View>
-        ) : null}
       </ScrollView>
+
+      {/* PERSISTENT BOTTOM BANNER AD */}
+      {ADS_ENABLED ? (
+        <View style={styles.persistentBannerContainer}>
+          <BannerAd
+            unitId={AD_UNIT_IDS.BANNER_HOME}
+            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            requestOptions={{ requestNonPersonalizedAdsOnly: false }}
+          />
+        </View>
+      ) : null}
 
       {/* SHARE SHEET MODAL */}
       <ShareSheet
@@ -935,5 +978,14 @@ const styles = StyleSheet.create({
   featureText: {
     fontSize: 14,
     fontWeight: '500',
+  },
+  persistentBannerContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingVertical: 4,
+    width: '100%',
   },
 });

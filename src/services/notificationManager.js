@@ -41,7 +41,6 @@ export async function setupNotificationChannel() {
     await Notifications.setNotificationChannelAsync('downloads_channel', {
       name: 'Download Completion Alerts',
       importance: Notifications.AndroidImportance.HIGH,
-      sound: 'default',
       vibrationPattern: [0, 250, 250, 250],
       enableVibrate: true,
       showBadge: true,
