@@ -5,7 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
-import { AppOpenAd, AdEventType } from 'react-native-google-mobile-ads';
+import mobileAds, { AppOpenAd, AdEventType } from 'react-native-google-mobile-ads';
 
 import { AD_UNIT_IDS, ADS_ENABLED } from './src/services/adConfig';
 import { lightTheme } from './src/theme';
@@ -99,10 +99,19 @@ export default function App() {
     let appOpenAd = null;
     let unsubLoaded = null;
     let unsubError = null;
+    let unsubClosed = null;
     let appStateSub = null;
     let isAdShowing = false;
+    let isSdkInitialized = false;
+    let lastAppOpenAdTime = 0;
+    const APP_OPEN_COOLDOWN_MS = 5 * 60 * 1000; // 5 Minutes Frequency Cap
 
     const loadAndShowAppOpenAd = () => {
+      const now = Date.now();
+      if (lastAppOpenAdTime > 0 && now - lastAppOpenAdTime < APP_OPEN_COOLDOWN_MS) {
+        return;
+      }
+
       try {
         if (!appOpenAd) {
           appOpenAd = AppOpenAd.createForAdRequest(AD_UNIT_IDS.APP_OPEN, {
@@ -111,17 +120,25 @@ export default function App() {
 
           unsubLoaded = appOpenAd.addAdEventListener(AdEventType.LOADED, () => {
             if (!isAdShowing) {
-              isAdShowing = true;
-              appOpenAd.show().catch((err) => {
-                isAdShowing = false;
-                console.log('[AdMob] App Open Ad show error:', err.message);
-              });
+              const checkTime = Date.now();
+              if (lastAppOpenAdTime === 0 || checkTime - lastAppOpenAdTime >= APP_OPEN_COOLDOWN_MS) {
+                isAdShowing = true;
+                lastAppOpenAdTime = checkTime;
+                appOpenAd.show().catch((err) => {
+                  isAdShowing = false;
+                  console.log('[AdMob] App Open Ad show error:', err.message);
+                });
+              }
             }
           });
 
           unsubError = appOpenAd.addAdEventListener(AdEventType.ERROR, (error) => {
             isAdShowing = false;
             console.log('[AdMob] App Open Ad load error:', error.message);
+          });
+
+          unsubClosed = appOpenAd.addAdEventListener(AdEventType.CLOSED, () => {
+            isAdShowing = false;
           });
         }
         appOpenAd.load();
@@ -130,15 +147,26 @@ export default function App() {
       }
     };
 
-    loadAndShowAppOpenAd();
+    // Initialize Google Mobile Ads SDK first, then load App Open Ad
+    mobileAds()
+      .initialize()
+      .then((adapterStatuses) => {
+        console.log('[AdMob] Google Mobile Ads SDK Initialized successfully', adapterStatuses);
+        isSdkInitialized = true;
+        loadAndShowAppOpenAd();
+      })
+      .catch((err) => {
+        console.log('[AdMob] SDK Initialization error:', err.message);
+      });
 
     // Listen for background -> foreground transition
     const { AppState } = require('react-native');
     let prevAppState = AppState.currentState;
     appStateSub = AppState.addEventListener('change', (nextAppState) => {
       if (prevAppState.match(/inactive|background/) && nextAppState === 'active') {
-        isAdShowing = false;
-        loadAndShowAppOpenAd();
+        if (isSdkInitialized && !isAdShowing) {
+          loadAndShowAppOpenAd();
+        }
       }
       prevAppState = nextAppState;
     });
@@ -146,6 +174,7 @@ export default function App() {
     return () => {
       if (unsubLoaded) unsubLoaded();
       if (unsubError) unsubError();
+      if (unsubClosed) unsubClosed();
       if (appStateSub) appStateSub.remove();
     };
   }, []);

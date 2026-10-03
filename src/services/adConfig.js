@@ -1,37 +1,36 @@
 import { TestIds } from 'react-native-google-mobile-ads';
 
-// AdMob Configuration for Insta Downloader
+// AdMob Configuration for Insta Downloader (Strictly 4 requested Ad units)
 export const USE_PRODUCTION_ADS = true;
 export const ADS_ENABLED = true;
 
 export const ADMOB_APP_ID = 'ca-app-pub-9717309889631554~2662088200';
 
-// Production App Open Ad Unit ID
+// 1. App Open Ad Unit ID
 export const APP_OPEN_AD_UNIT_ID = USE_PRODUCTION_ADS
   ? 'ca-app-pub-9717309889631554/2778558146'
   : TestIds.APP_OPEN;
 
-// Production Banner Ad Unit ID
+// 2. Banner Ad Unit ID
 export const BANNER_AD_UNIT_ID = USE_PRODUCTION_ADS
   ? 'ca-app-pub-9717309889631554/2531146131'
   : TestIds.ADAPTIVE_BANNER;
 
-// 1. Get Files Rewarded Ad Unit ID
+// 3. Get Files Rewarded Ad Unit ID
 export const REWARDED_GET_FILES_ID = USE_PRODUCTION_ADS
   ? 'ca-app-pub-9717309889631554/2674530642'
   : TestIds.REWARDED;
 
-// 2. Start Download Rewarded Ad Unit ID
+// 4. Start Download Rewarded Ad Unit ID
 export const REWARDED_START_DOWNLOAD_ID = USE_PRODUCTION_ADS
   ? 'ca-app-pub-9717309889631554/3177179249'
   : TestIds.REWARDED;
 
 export const AD_UNIT_IDS = {
+  APP_OPEN: APP_OPEN_AD_UNIT_ID,
   BANNER_HOME: BANNER_AD_UNIT_ID,
   BANNER_DOWNLOADS: BANNER_AD_UNIT_ID,
   BANNER_SETTINGS: BANNER_AD_UNIT_ID,
-  APP_OPEN: APP_OPEN_AD_UNIT_ID,
-  INTERSTITIAL: USE_PRODUCTION_ADS ? 'ca-app-pub-3940256099942544/1033173712' : TestIds.INTERSTITIAL,
   REWARDED_GET_FILES: REWARDED_GET_FILES_ID,
   REWARDED_START_DOWNLOAD: REWARDED_START_DOWNLOAD_ID,
 };

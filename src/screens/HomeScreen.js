@@ -561,6 +561,8 @@ export default function HomeScreen({ navigation }) {
                 </LinearGradient>
               </TouchableOpacity>
             )}
+          </View>
+        ) : null}
       </ScrollView>
 
       {/* PERSISTENT BOTTOM BANNER AD */}

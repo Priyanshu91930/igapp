@@ -73,25 +73,35 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
 
   let response;
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const fetchWithTimeout = async (endpoint, timeoutMs = 8500) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(endpoint, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'InstaDownloaderApp/1.0',
+          },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        return res;
+      } catch (e) {
+        clearTimeout(timer);
+        throw e;
+      }
+    };
 
-    response = await fetch(targetEndpoint, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'InstaDownloaderApp/1.0',
-      },
-      signal: controller.signal,
-    }).catch(async () => {
-      // Fallback only to specific Instagram endpoint
-      return await fetch(fallbackEndpoint, {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
+    // Primary attempt
+    response = await fetchWithTimeout(targetEndpoint, 8500).catch(async () => {
+      // Retry with stripped clean URL (removes tracking params like ?igsh=...)
+      const cleanUrl = validUrl.split('?')[0];
+      const retryEndpoint = `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(cleanUrl)}`;
+      return await fetchWithTimeout(retryEndpoint, 8500).catch(async () => {
+        return await fetchWithTimeout(fallbackEndpoint, 8500).catch(() => null);
       });
     });
-
-    clearTimeout(timeoutId);
   } catch (err) {
     const error = new Error('Unable to connect. Please check your internet connection.');
     error.code = 'NETWORK_ERROR';
