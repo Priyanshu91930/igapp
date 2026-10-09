@@ -93,7 +93,7 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
 
   let response;
   try {
-    const fetchWithTimeout = async (endpoint, timeoutMs = 15000) => {
+    const fetchWithTimeout = async (endpoint, timeoutMs = 9500) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
@@ -114,12 +114,12 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
     };
 
     // Primary attempt
-    response = await fetchWithTimeout(targetEndpoint, 15000).catch(async () => {
+    response = await fetchWithTimeout(targetEndpoint, 9500).catch(async () => {
       // Retry with stripped clean URL (removes tracking params)
       const cleanUrl = validUrl.split('?')[0];
       const retryEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(cleanUrl)}`;
-      return await fetchWithTimeout(retryEndpoint, 15000).catch(async () => {
-        return await fetchWithTimeout(fallbackEndpoint, 15000).catch(() => null);
+      return await fetchWithTimeout(retryEndpoint, 9500).catch(async () => {
+        return await fetchWithTimeout(fallbackEndpoint, 9500).catch(() => null);
       });
     });
   } catch (err) {
