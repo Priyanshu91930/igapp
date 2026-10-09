@@ -105,15 +105,8 @@ export default function HomeScreen({ navigation }) {
     try {
       const settings = await getSettings();
 
-      // Trigger Rewarded Ad & URL Resolution in PARALLEL
-      const adPromise = showGetFilesAdIfAvailable();
-      const resolvePromise = resolveInstagramMedia(settings.apiBaseUrl, validation.url);
-
-      const [adResult, mediaInfo] = await Promise.all([
-        adPromise.catch(() => false),
-        resolvePromise,
-      ]);
-
+      // URL Resolution without Get Files Ad
+      const mediaInfo = await resolveInstagramMedia(settings.apiBaseUrl, validation.url);
       setResolvedMedia(mediaInfo);
     } catch (err) {
       setErrorMsg(err.message || 'This Instagram media could not be downloaded.');
@@ -125,20 +118,22 @@ export default function HomeScreen({ navigation }) {
   const startDownloadProcess = async (mediaInfo) => {
     if (!mediaInfo) return;
 
-    setDownloading(true);
-    setIsPaused(false);
-    setDownloadStats({
-      percentage: 0,
-      written: '0 B',
-      total: mediaInfo.sizeFormatted || 'Unknown',
-      speed: '2.4 MB/s',
-      timeRemaining: 'Calculating...',
-    });
-
     try {
-      // Trigger Start Download Rewarded Ad & File Download in PARALLEL
-      const adPromise = showStartDownloadAdIfAvailable();
-      const downloadPromise = downloadInstagramMedia(
+      // 1. Show Rewarded Ad FIRST and wait until user finishes/closes the ad
+      await showStartDownloadAdIfAvailable().catch(() => false);
+
+      // 2. Start file download ONLY after ad finishes
+      setDownloading(true);
+      setIsPaused(false);
+      setDownloadStats({
+        percentage: 0,
+        written: '0 B',
+        total: mediaInfo.sizeFormatted || 'Unknown',
+        speed: '2.4 MB/s',
+        timeRemaining: 'Calculating...',
+      });
+
+      const downloadedItem = await downloadInstagramMedia(
         mediaInfo,
         (progressData) => {
           setDownloadStats({
@@ -150,11 +145,6 @@ export default function HomeScreen({ navigation }) {
           });
         }
       );
-
-      const [adShown, downloadedItem] = await Promise.all([
-        adPromise.catch(() => false),
-        downloadPromise,
-      ]);
 
       setDownloadSuccess(downloadedItem);
       Alert.alert('Download Complete!', 'Instagram media has been saved to your downloads.');

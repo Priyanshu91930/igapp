@@ -15,6 +15,9 @@ export async function getSettings() {
   try {
     const raw = await AsyncStorage.getItem(SETTINGS_KEY);
     const parsed = raw ? JSON.parse(raw) : {};
+    if (parsed.apiBaseUrl && parsed.apiBaseUrl.includes('vercel.app')) {
+      parsed.apiBaseUrl = DEFAULT_SETTINGS.apiBaseUrl;
+    }
     return { ...DEFAULT_SETTINGS, ...parsed };
   } catch (e) {
     return { ...DEFAULT_SETTINGS };

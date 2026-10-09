@@ -1,4 +1,4 @@
-import { RewardedAd, RewardedAdEventType } from 'react-native-google-mobile-ads';
+import { RewardedAd, RewardedAdEventType, AdEventType } from 'react-native-google-mobile-ads';
 import { REWARDED_GET_FILES_ID, REWARDED_START_DOWNLOAD_ID, ADS_ENABLED } from './adConfig';
 
 class RewardedAdController {
@@ -35,31 +35,52 @@ class RewardedAdController {
     }
   }
 
-  async show() {
-    if (!ADS_ENABLED) return false;
+  show() {
+    if (!ADS_ENABLED) return Promise.resolve(false);
 
-    try {
-      if (!this.ad) {
-        this.init();
+    return new Promise((resolve) => {
+      try {
+        if (!this.ad || !this.isLoaded) {
+          if (!this.isLoading) this.init();
+          return resolve(false);
+        }
+
+        let unsubClosed = null;
+        let unsubEarned = null;
+
+        const cleanup = () => {
+          if (typeof unsubClosed === 'function') unsubClosed();
+          if (typeof unsubEarned === 'function') unsubEarned();
+          this.isLoaded = false;
+
+          // Auto preload next rewarded ad
+          setTimeout(() => {
+            if (this.ad) this.ad.load();
+          }, 1000);
+        };
+
+        if (AdEventType && AdEventType.CLOSED) {
+          unsubClosed = this.ad.addAdEventListener(AdEventType.CLOSED, () => {
+            console.log(`[RewardedAd:${this.name}] Ad CLOSED by user`);
+            cleanup();
+            resolve(true);
+          });
+        }
+
+        unsubEarned = this.ad.addAdEventListener(RewardedAdEventType.EARNED_REWARD, (reward) => {
+          console.log(`[RewardedAd:${this.name}] Reward earned:`, reward);
+        });
+
+        this.ad.show().catch((e) => {
+          console.log(`[RewardedAd:${this.name}] Show error:`, e.message);
+          cleanup();
+          resolve(false);
+        });
+      } catch (e) {
+        console.log(`[RewardedAd:${this.name}] Exception during show:`, e.message);
+        resolve(false);
       }
-
-      if (this.isLoaded && this.ad) {
-        await this.ad.show();
-        this.isLoaded = false;
-
-        // Auto preload next rewarded ad
-        setTimeout(() => {
-          if (this.ad) this.ad.load();
-        }, 1000);
-        return true;
-      } else if (!this.isLoading && this.ad) {
-        this.ad.load();
-        this.isLoading = true;
-      }
-    } catch (e) {
-      console.log(`[RewardedAd:${this.name}] Show error:`, e.message);
-    }
-    return false;
+    });
   }
 }
 
@@ -72,7 +93,7 @@ export function initAllRewardedAds() {
 }
 
 export function showGetFilesAdIfAvailable() {
-  return getFilesAd.show();
+  return Promise.resolve(false);
 }
 
 export function showStartDownloadAdIfAvailable() {

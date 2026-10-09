@@ -95,7 +95,7 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
     : `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(cleanUrl)}`;
 
   let response;
-  const fetchWithTimeout = async (endpoint, timeoutMs = 8500) => {
+  const fetchWithTimeout = async (endpoint, timeoutMs = 28000) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -117,12 +117,10 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
   };
 
   try {
-    // Stage 1: Clean URL attempt (Vercel Budget #1: 8.5s)
-    response = await fetchWithTimeout(primaryEndpoint, 8500).catch(async () => {
-      // Stage 2: Raw URL attempt with fresh Vercel Budget #2 (8.5s)
-      return await fetchWithTimeout(rawEndpoint, 8500).catch(async () => {
-        // Stage 3: Fallback endpoint with fresh Vercel Budget #3 (8.5s)
-        return await fetchWithTimeout(fallbackEndpoint, 8500).catch(() => null);
+    // Attempt rawEndpoint first (matching browser URL structure), then fallbacks
+    response = await fetchWithTimeout(rawEndpoint, 28000).catch(async () => {
+      return await fetchWithTimeout(primaryEndpoint, 28000).catch(async () => {
+        return await fetchWithTimeout(fallbackEndpoint, 28000).catch(() => null);
       });
     });
   } catch (err) {
