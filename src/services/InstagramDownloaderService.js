@@ -83,7 +83,7 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
 
   const validUrl = validation.url;
   const isThreads = validation.isThreads || /threads\.(com|net)/i.test(validUrl);
-  const cleanBaseUrl = (baseUrl || 'https://downloader-api-tau.vercel.app').replace(/\/+$/, '');
+  const cleanBaseUrl = (baseUrl || 'https://alldownloader.solankipriyanshu94.workers.dev').replace(/\/+$/, '');
   
   const platformName = isThreads ? 'threads' : 'instagram';
   const cleanUrl = validUrl.split('?')[0];

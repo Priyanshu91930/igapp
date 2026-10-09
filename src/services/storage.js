@@ -4,7 +4,7 @@ const DOWNLOADS_HISTORY_KEY = '@instadownloader/downloads_history';
 const SETTINGS_KEY = '@instadownloader/settings';
 
 export const DEFAULT_SETTINGS = {
-  apiBaseUrl: 'https://downloader-api-tau.vercel.app',
+  apiBaseUrl: 'https://alldownloader.solankipriyanshu94.workers.dev',
   themeMode: 'light', // 'light' | 'dark' | 'system'
   downloadFolder: 'InstaDownloader',
   autoSaveToGallery: true,
