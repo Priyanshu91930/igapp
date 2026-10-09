@@ -86,40 +86,43 @@ export async function resolveInstagramMedia(baseUrl, inputUrl) {
   const cleanBaseUrl = (baseUrl || 'https://downloader-api-tau.vercel.app').replace(/\/+$/, '');
   
   const platformName = isThreads ? 'threads' : 'instagram';
-  const targetEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(validUrl)}`;
+  const cleanUrl = validUrl.split('?')[0];
+
+  const primaryEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(cleanUrl)}`;
+  const rawEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(validUrl)}`;
   const fallbackEndpoint = isThreads
-    ? `${cleanBaseUrl}/api/download/threads?url=${encodeURIComponent(validUrl)}`
-    : `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(validUrl)}`;
+    ? `${cleanBaseUrl}/api/download/threads?url=${encodeURIComponent(cleanUrl)}`
+    : `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(cleanUrl)}`;
 
   let response;
-  try {
-    const fetchWithTimeout = async (endpoint, timeoutMs = 9500) => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const res = await fetch(endpoint, {
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'InstaDownloaderApp/1.0',
-          },
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
-        return res;
-      } catch (e) {
-        clearTimeout(timer);
-        throw e;
-      }
-    };
+  const fetchWithTimeout = async (endpoint, timeoutMs = 8500) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(endpoint, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'InstaDownloaderApp/1.0',
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res && res.ok) return res;
+      throw new Error(`HTTP ${res ? res.status : 500}`);
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  };
 
-    // Primary attempt
-    response = await fetchWithTimeout(targetEndpoint, 9500).catch(async () => {
-      // Retry with stripped clean URL (removes tracking params)
-      const cleanUrl = validUrl.split('?')[0];
-      const retryEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(cleanUrl)}`;
-      return await fetchWithTimeout(retryEndpoint, 9500).catch(async () => {
-        return await fetchWithTimeout(fallbackEndpoint, 9500).catch(() => null);
+  try {
+    // Stage 1: Clean URL attempt (Vercel Budget #1: 8.5s)
+    response = await fetchWithTimeout(primaryEndpoint, 8500).catch(async () => {
+      // Stage 2: Raw URL attempt with fresh Vercel Budget #2 (8.5s)
+      return await fetchWithTimeout(rawEndpoint, 8500).catch(async () => {
+        // Stage 3: Fallback endpoint with fresh Vercel Budget #3 (8.5s)
+        return await fetchWithTimeout(fallbackEndpoint, 8500).catch(() => null);
       });
     });
   } catch (err) {
