@@ -1,63 +1,80 @@
 /**
  * InstagramDownloaderService.js
  *
- * Dedicated service layer strictly for Instagram URL validation, media resolution,
- * and error handling for Insta Downloader app.
+ * Dedicated service layer for Instagram & Threads URL validation, media resolution,
+ * and error handling for Insta & Threads Downloader app.
  */
 
 // Strict pattern for Instagram URLs
 const INSTAGRAM_URL_REGEX = /(?:https?:\/\/)?(?:www\.|m\.)?(?:instagram\.com|instagr\.am)\/(?:p|reel|reels|tv|stories|share)\/([A-Za-z0-9_-]+)/i;
 
-// Other platform domain signatures to detect non-Instagram links explicitly
-const OTHER_PLATFORMS_REGEX = /(youtube\.com|youtu\.be|tiktok\.com|facebook\.com|fb\.watch|twitter\.com|x\.com|pinterest\.com|pin\.it|spotify\.com|soundcloud\.com|mediafire\.com|drive\.google\.com|capcut\.com|douyin\.com|kuaishou\.com|threads\.net|snackvideo\.com)/i;
+// Strict pattern for Threads URLs
+const THREADS_URL_REGEX = /(?:https?:\/\/)?(?:www\.)?(?:threads\.net|threads\.com)\/(?:@[\w.-]+\/post\/|share\/|t\/)([A-Za-z0-9_-]+)/i;
+
+// Other platform domain signatures to detect non-Instagram/Threads links explicitly
+const OTHER_PLATFORMS_REGEX = /(youtube\.com|youtu\.be|tiktok\.com|facebook\.com|fb\.watch|twitter\.com|x\.com|pinterest\.com|pin\.it|spotify\.com|soundcloud\.com|mediafire\.com|drive\.google\.com|capcut\.com|douyin\.com|kuaishou\.com|snackvideo\.com)/i;
+
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
 
 /**
- * Validates whether the given text contains a valid Instagram post/reel/photo/video link.
- * Rejects non-Instagram platform links explicitly.
+ * Validates whether the given text contains a valid Instagram or Threads post/reel/photo/video link.
+ * Rejects other platform links explicitly.
  * 
  * @param {string} input - User input string
- * @returns {{ valid: boolean, url?: string, error?: string }}
+ * @returns {{ valid: boolean, url?: string, isThreads?: boolean, error?: string }}
  */
 export function validateInstagramUrl(input) {
   if (!input || typeof input !== 'string') {
-    return { valid: false, error: 'Please enter a valid Instagram link.' };
+    return { valid: false, error: 'Please enter a valid Instagram or Threads link.' };
   }
 
   const trimmed = input.trim();
 
-  // Explicit check for non-Instagram media platforms
+  // Explicit check for non-Instagram/Threads media platforms
   if (OTHER_PLATFORMS_REGEX.test(trimmed)) {
     return {
       valid: false,
-      error: 'Only Instagram links are supported. Non-Instagram links (YouTube, TikTok, Facebook, etc.) are disabled.',
+      error: 'Only Instagram and Threads links are supported.',
     };
   }
 
-  const match = trimmed.match(INSTAGRAM_URL_REGEX);
-  if (!match) {
+  const isIg = trimmed.match(INSTAGRAM_URL_REGEX);
+  const isThreads = trimmed.match(THREADS_URL_REGEX) || /(?:threads\.net|threads\.com)/i.test(trimmed);
+
+  if (!isIg && !isThreads) {
     return {
       valid: false,
-      error: 'Please enter a valid Instagram link (Reel, Video, Photo, or Story).',
+      error: 'Please enter a valid Instagram (Reel, Video, Photo, Story) or Threads link.',
     };
   }
 
-  let url = match[0];
+  let url = isIg ? isIg[0] : (trimmed.match(/https?:\/\/\S+/i)?.[0] || trimmed);
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = `https://${url}`;
   }
 
-  return { valid: true, url };
+  return { valid: true, url, isThreads: !!isThreads };
 }
 
 /**
- * Resolves an Instagram URL into downloadable media metadata.
+ * Resolves an Instagram or Threads URL into downloadable media metadata.
  * 
  * @param {string} baseUrl - API server base URL
- * @param {string} instagramUrl - Validated Instagram link
+ * @param {string} inputUrl - Validated Instagram or Threads link
  * @returns {Promise<Object>} Media details object { id, type, title, thumbnail, mediaItems, sizeFormatted }
  */
-export async function resolveInstagramMedia(baseUrl, instagramUrl) {
-  const validation = validateInstagramUrl(instagramUrl);
+export async function resolveInstagramMedia(baseUrl, inputUrl) {
+  const validation = validateInstagramUrl(inputUrl);
   if (!validation.valid) {
     const error = new Error(validation.error);
     error.code = 'INVALID_URL';
@@ -65,15 +82,18 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
   }
 
   const validUrl = validation.url;
+  const isThreads = validation.isThreads || /threads\.(com|net)/i.test(validUrl);
   const cleanBaseUrl = (baseUrl || 'https://downloader-api-tau.vercel.app').replace(/\/+$/, '');
   
-  // STRICTLY target ONLY Instagram endpoint: /api/download/instagram?url=...
-  const targetEndpoint = `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(validUrl)}`;
-  const fallbackEndpoint = `${cleanBaseUrl}/api/instagram?url=${encodeURIComponent(validUrl)}`;
+  const platformName = isThreads ? 'threads' : 'instagram';
+  const targetEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(validUrl)}`;
+  const fallbackEndpoint = isThreads
+    ? `${cleanBaseUrl}/api/download/threads?url=${encodeURIComponent(validUrl)}`
+    : `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(validUrl)}`;
 
   let response;
   try {
-    const fetchWithTimeout = async (endpoint, timeoutMs = 8500) => {
+    const fetchWithTimeout = async (endpoint, timeoutMs = 12000) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
@@ -94,12 +114,12 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
     };
 
     // Primary attempt
-    response = await fetchWithTimeout(targetEndpoint, 8500).catch(async () => {
-      // Retry with stripped clean URL (removes tracking params like ?igsh=...)
+    response = await fetchWithTimeout(targetEndpoint, 12000).catch(async () => {
+      // Retry with stripped clean URL (removes tracking params)
       const cleanUrl = validUrl.split('?')[0];
-      const retryEndpoint = `${cleanBaseUrl}/api/download/instagram?url=${encodeURIComponent(cleanUrl)}`;
-      return await fetchWithTimeout(retryEndpoint, 8500).catch(async () => {
-        return await fetchWithTimeout(fallbackEndpoint, 8500).catch(() => null);
+      const retryEndpoint = `${cleanBaseUrl}/api/download/${platformName}?url=${encodeURIComponent(cleanUrl)}`;
+      return await fetchWithTimeout(retryEndpoint, 12000).catch(async () => {
+        return await fetchWithTimeout(fallbackEndpoint, 12000).catch(() => null);
       });
     });
   } catch (err) {
@@ -110,7 +130,7 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
 
   if (!response || !response.ok) {
     if (response && response.status === 404) {
-      const error = new Error('This Instagram media could not be downloaded.');
+      const error = new Error(`This ${isThreads ? 'Threads' : 'Instagram'} media could not be downloaded.`);
       error.code = 'MEDIA_UNAVAILABLE';
       throw error;
     }
@@ -119,14 +139,14 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
       error.code = 'PRIVATE_CONTENT';
       throw error;
     }
-    let errorMsg = 'This Instagram media could not be downloaded.';
+    let errorMsg = `This ${isThreads ? 'Threads' : 'Instagram'} media could not be downloaded.`;
     try {
       const errJson = await response.json();
       if (errJson && errJson.message) {
         if (/private|login|account/i.test(errJson.message)) {
           errorMsg = 'This content cannot be accessed.';
         } else if (/not found|unavailable|removed/i.test(errJson.message)) {
-          errorMsg = 'This Instagram media could not be downloaded.';
+          errorMsg = `This ${isThreads ? 'Threads' : 'Instagram'} media could not be downloaded.`;
         }
       }
     } catch (_) {}
@@ -139,7 +159,7 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
   try {
     data = await response.json();
   } catch (e) {
-    const error = new Error('This Instagram media could not be downloaded.');
+    const error = new Error(`This ${isThreads ? 'Threads' : 'Instagram'} media could not be downloaded.`);
     error.code = 'PARSE_ERROR';
     throw error;
   }
@@ -152,6 +172,7 @@ export async function resolveInstagramMedia(baseUrl, instagramUrl) {
  */
 function parseInstagramApiResponse(data, originalUrl) {
   const norm = data.normalized || data;
+  const isThreads = /threads\.(com|net)/i.test(originalUrl);
 
   let rawCaption =
     norm.title ||
@@ -160,14 +181,15 @@ function parseInstagramApiResponse(data, originalUrl) {
     data.title ||
     data.text ||
     data.description ||
+    (data.result && (data.result.title || data.result.caption)) ||
     (data.result && data.result[0] && (data.result[0].caption || data.result[0].title)) ||
     '';
 
-  const shortcodeMatch = String(originalUrl || '').match(/(?:p|reel|reels|tv|stories|share)\/([A-Za-z0-9_-]+)/i);
+  const shortcodeMatch = String(originalUrl || '').match(/(?:p|reel|reels|tv|stories|share|post)\/([A-Za-z0-9_-]+)/i);
   const shortcode = shortcodeMatch ? shortcodeMatch[1] : '';
 
-  let title = rawCaption ? String(rawCaption).trim() : '';
-  let thumbnail = norm.thumbnail || data.thumbnail || data.cover || '';
+  let title = rawCaption ? decodeHtmlEntities(String(rawCaption).trim()) : '';
+  let thumbnail = norm.thumbnail || data.thumbnail || data.cover || (data.result && data.result.thumbnail) || '';
   let mediaList = [];
 
   if (norm.kind === 'media' && Array.isArray(norm.media)) {
@@ -187,40 +209,42 @@ function parseInstagramApiResponse(data, originalUrl) {
     if (!thumbnail && data.result[0] && data.result[0].thumbnail) {
       thumbnail = data.result[0].thumbnail;
     }
-  } else if (data.url || data.download_url || data.video_url) {
-    const mediaUrl = data.url || data.download_url || data.video_url;
+  } else if (data.url || data.download_url || data.video_url || (data.result && (data.result.video || data.result.download))) {
+    const mediaUrl = data.url || data.download_url || data.video_url || (data.result && (data.result.video || data.result.download));
     mediaList = [{
       id: 'media_0',
       url: mediaUrl,
       type: mediaUrl.match(/\.(jpg|jpeg|png|webp)/i) ? 'photo' : 'video',
-      label: 'Media',
+      label: 'Video',
     }];
   }
 
   if (mediaList.length === 0) {
-    const error = new Error('This Instagram media could not be downloaded.');
+    const error = new Error(`This ${isThreads ? 'Threads' : 'Instagram'} media could not be downloaded.`);
     error.code = 'NO_MEDIA_FOUND';
     throw error;
   }
 
-  let detectedType = 'Reel';
-  if (originalUrl.includes('/p/')) {
-    detectedType = mediaList[0].type === 'photo' ? 'Photo' : 'Video';
-  } else if (originalUrl.includes('/tv/')) {
-    detectedType = 'Video';
-  } else if (originalUrl.includes('/stories/')) {
-    detectedType = 'Story';
-  } else if (mediaList[0].type === 'photo') {
-    detectedType = 'Photo';
+  let detectedType = isThreads ? 'Threads Video' : 'Reel';
+  if (!isThreads) {
+    if (originalUrl.includes('/p/')) {
+      detectedType = mediaList[0].type === 'photo' ? 'Photo' : 'Video';
+    } else if (originalUrl.includes('/tv/')) {
+      detectedType = 'Video';
+    } else if (originalUrl.includes('/stories/')) {
+      detectedType = 'Story';
+    } else if (mediaList[0].type === 'photo') {
+      detectedType = 'Photo';
+    }
   }
 
   const primaryDownloadUrl = mediaList[0].url;
 
   return {
-    id: `ig_${Date.now()}`,
+    id: `media_${Date.now()}`,
     originalUrl,
     type: detectedType,
-    title: title || (shortcode ? `Instagram ${detectedType} (${shortcode})` : `Instagram ${detectedType}`),
+    title: title || (isThreads ? `Threads Video` : (shortcode ? `Instagram ${detectedType} (${shortcode})` : `Instagram ${detectedType}`)),
     thumbnail: thumbnail || primaryDownloadUrl,
     downloadUrl: primaryDownloadUrl,
     mediaItems: mediaList,
